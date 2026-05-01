@@ -2,14 +2,14 @@
 <html>
 
 <script>
-if (localStorage.getItem("role") !== "teller") {
+if (!["crs", "teller", "encoder"].includes(localStorage.getItem("role"))) {
   window.location.href = "login.html";
 }
 </script>
 
 <head>
   <meta charset="UTF-8">
-  <title>Teller Dashboard</title>
+  <title>Customer Relations Specialist Dashboard</title>
   <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -19,22 +19,22 @@ if (localStorage.getItem("role") !== "teller") {
   <!-- SIDEBAR -->
   <div class="sidebar">
     <div class="sidebar-header">
-      <h2>WithdrawSys</h2>
+      <h2>ClaimsSys</h2>
     </div>
 
     <div class="sidebar-role">
-      <span class="role-badge">💙 Teller</span>
+      <span class="role-badge">CRS</span>
     </div>
 
     <div class="sidebar-main">
       <button class="sidebar-btn active" onclick="navigateToTeller('entry')">
-        <span class="icon">📥</span> Withdrawal Entry
+        <span class="icon">&#128221;</span> Claim Encoding
       </button>
       <button class="sidebar-btn" onclick="navigateToTeller('submissions')">
         <span class="icon">📄</span> My Submissions
       </button>
       <button class="sidebar-btn" onclick="navigateToTeller('history')">
-        <span class="icon">💳</span> Transaction History
+        <span class="icon">&#128338;</span> Claim History
       </button>
     </div>
 
@@ -50,8 +50,8 @@ if (localStorage.getItem("role") !== "teller") {
         <span class="icon">🚪</span> Sign Out
       </button>
       <div class="sidebar-user">
-        <div class="user-fullname" id="userFullName">Teller Name</div>
-        <div class="user-position" id="userPosition">Teller</div>
+        <div class="user-fullname" id="userFullName">CRS Name</div>
+        <div class="user-position" id="userPosition">Customer Relations Specialist</div>
       </div>
     </div>
   </div>
@@ -60,13 +60,13 @@ if (localStorage.getItem("role") !== "teller") {
   <div class="main">
     <div class="main-header">
       <div class="header-content">
-        <h1>Withdrawal Entry</h1>
-        <p class="subtitle">Teller Portal · Submit requests to Branch Manager for review</p>
+        <h1>Claim Encoding</h1>
+        <p class="subtitle">Customer Relations Specialist Portal - Encode claim requests and upload supporting documents</p>
       </div>
       <div class="header-actions">
         <button class="btn" onclick="location.reload()">Refresh</button>
         <button class="btn" onclick="alert('Export feature not configured yet')">Export</button>
-        <button class="btn blue" onclick="openRequestModal()">New Withdrawal Request</button>
+        <button class="btn blue" onclick="openRequestModal()">New Claim Request</button>
       </div>
     </div>
 
@@ -80,12 +80,12 @@ if (localStorage.getItem("role") !== "teller") {
         </div>
 
         <div class="card">
-          <h3>Pending Review</h3>
+          <h3>For Verification</h3>
           <p id="countPending">0</p>
         </div>
 
         <div class="card">
-          <h3>Under Review</h3>
+          <h3>In Workflow</h3>
           <p id="countReview">0</p>
         </div>
 
@@ -99,7 +99,7 @@ if (localStorage.getItem("role") !== "teller") {
       <div class="table-container">
         <div class="table-header">
           <div>
-            <h3>My Submitted Requests</h3>
+            <h3>My Submitted Claims</h3>
             <p class="table-count" id="tableCount">0 requests</p>
           </div>
         </div>
@@ -109,10 +109,10 @@ if (localStorage.getItem("role") !== "teller") {
             <tr>
               <th>REQUEST NO.</th>
               <th>MEMBER NAME</th>
-              <th>TOTAL INVESTMENT</th>
-              <th>AMOUNT WITHDRAWN</th>
-              <th>BALANCE</th>
-              <th>PURPOSE</th>
+              <th>DAYS COMPUTED</th>
+              <th>RATE / DAY</th>
+              <th>CLAIMABLE AMOUNT</th>
+              <th>HOSPITAL</th>
               <th>STATUS</th>
               <th>DATE</th>
               <th>ACTIONS</th>
@@ -128,7 +128,7 @@ if (localStorage.getItem("role") !== "teller") {
       <div class="table-container">
         <div class="table-header">
           <div>
-            <h3>My Submitted Requests</h3>
+            <h3>My Submitted Claims</h3>
             <p class="table-count" id="submissionsCount">0 requests</p>
           </div>
         </div>
@@ -138,10 +138,10 @@ if (localStorage.getItem("role") !== "teller") {
             <tr>
               <th>REQUEST NO.</th>
               <th>MEMBER NAME</th>
-              <th>TOTAL INVESTMENT</th>
-              <th>AMOUNT WITHDRAWN</th>
-              <th>BALANCE</th>
-              <th>PURPOSE</th>
+              <th>DAYS COMPUTED</th>
+              <th>RATE / DAY</th>
+              <th>CLAIMABLE AMOUNT</th>
+              <th>HOSPITAL</th>
               <th>STATUS</th>
               <th>DATE</th>
               <th>ACTIONS</th>
@@ -157,7 +157,7 @@ if (localStorage.getItem("role") !== "teller") {
       <div class="table-container">
         <div class="table-header">
           <div>
-            <h3>Transaction History</h3>
+            <h3>Claim History</h3>
             <p class="table-count" id="historyCount">0 transactions</p>
           </div>
         </div>
@@ -167,8 +167,8 @@ if (localStorage.getItem("role") !== "teller") {
             <tr>
               <th>REQUEST NO.</th>
               <th>MEMBER NAME</th>
-              <th>AMOUNT</th>
-              <th>PURPOSE</th>
+              <th>CLAIMABLE AMOUNT</th>
+              <th>HOSPITAL</th>
               <th>STATUS</th>
               <th>PROCESSED BY</th>
               <th>REVIEWED BY</th>
@@ -212,49 +212,92 @@ if (localStorage.getItem("role") !== "teller") {
 <div class="modal" id="requestModal">
   <div class="modal-content modal-lg">
     <div class="modal-header">
-      <h3 id="requestModalTitle">New Withdrawal Request</h3>
+      <h3 id="requestModalTitle">New Claim Request</h3>
       <button class="modal-close" onclick="closeRequestModal()">✕</button>
     </div>
     <div class="modal-body">
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+      <input id="requestMemberId" type="hidden">
+      <datalist id="memberOptions"></datalist>
+      <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; margin-bottom: 20px;">
         <div>
           <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Member Name</label>
-          <input id="requestMember" placeholder="Search or enter member name" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <input id="requestMember" list="memberOptions" placeholder="Search member name" autocomplete="off" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
         </div>
         <div>
           <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Contact Number</label>
-          <input id="requestContact" placeholder="Enter contact number" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <input id="requestContact" readonly placeholder="Loaded from member record" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; background: #f8fafc;">
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; margin-bottom: 20px;">
+        <div>
+          <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Gender</label>
+          <input id="requestGender" readonly placeholder="Loaded from member record" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; background: #f8fafc;">
+        </div>
+        <div>
+          <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Segmentation</label>
+          <input id="requestSegmentation" readonly placeholder="Loaded from member record" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; background: #f8fafc;">
+        </div>
+        <div>
+          <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Branch</label>
+          <input id="requestBranch" readonly placeholder="Loaded from member record" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; background: #f8fafc;">
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 20px;">
+        <div>
+          <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Hospital</label>
+          <select id="requestHospital" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            <option value="">Select hospital</option>
+          </select>
         </div>
       </div>
 
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
         <div>
-          <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Total Investment</label>
-          <input id="requestTotal" type="number" placeholder="Enter amount" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Date Admitted</label>
+          <input id="requestDateAdmitted" type="date" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
         </div>
+        <div>
+          <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Date Discharged</label>
+          <input id="requestDateDischarged" type="date" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+        </div>
+      </div>
 
-      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
-        <div>
-          <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Withdrawal Amount</label>
-          <input id="requestAmount" type="number" placeholder="Enter amount" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+      <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-bottom: 20px;">
+        <div style="padding: 12px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 4px;">
+          <label style="font-size: 11px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 6px;">Actual Days</label>
+          <div id="actualDaysConfined" style="font-size: 18px; font-weight: 700;">0</div>
         </div>
-        <div>
-          <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Remaining Balance</label>
-          <div style="padding: 12px; background: #e8f8f5; border-radius: 4px; font-size: 14px; color: #16a085; font-weight: 600;">₱<span id="formBalance">0.00</span></div>
+        <div style="padding: 12px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 4px;">
+          <label style="font-size: 11px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 6px;">Computed Days</label>
+          <div id="computedDaysConfined" style="font-size: 18px; font-weight: 700;">0</div>
+        </div>
+        <div style="padding: 12px; background: #f8fafc; border: 1px solid #e5e7eb; border-radius: 4px;">
+          <label style="font-size: 11px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 6px;">Rate / Day</label>
+          <div style="font-size: 18px; font-weight: 700;">PHP <span id="ratePerDay">0.00</span></div>
+        </div>
+        <div style="padding: 12px; background: #e8f8f5; border: 1px solid #b8e6dc; border-radius: 4px;">
+          <label style="font-size: 11px; color: #116b5a; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 6px;">Total Claimable</label>
+          <div style="font-size: 18px; font-weight: 700; color: #116b5a;">PHP <span id="totalClaimableAmount">0.00</span></div>
         </div>
       </div>
 
       <div style="margin-bottom: 20px;">
-        <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Purpose of Withdrawal</label>
-        <input id="requestPurpose" placeholder="Enter purpose of withdrawal" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+        <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Diagnosis / Remarks</label>
+        <input id="requestPurpose" placeholder="Enter diagnosis or remarks" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+      </div>
+
+      <div style="margin-bottom: 20px;">
+        <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Attachments</label>
+        <input id="requestAttachments" type="file" multiple style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
       </div>
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeRequestModal()">Close</button>
-      <button id="requestSubmitButton" class="btn blue" onclick="submitRequest()">Submit Request</button>
+      <button id="requestSubmitButton" class="btn blue" onclick="submitRequest()">Submit Claim</button>
     </div>
   </div>
-</div>
 </div>
 
 <script src="app.js"></script>
@@ -263,21 +306,6 @@ loadUserProfile();
 loadStyledTable("tellerTable");
 loadTellerCounts();
 initializeTellerPage();
-
-// Calculate remaining balance in teller form
-document.getElementById("requestAmount").addEventListener("input", () => {
-  const total = parseFloat(document.getElementById("requestTotal").value) || 0;
-  const amount = parseFloat(document.getElementById("requestAmount").value) || 0;
-  const balance = total - amount;
-  document.getElementById("formBalance").textContent = Math.max(balance, 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-});
-
-document.getElementById("requestTotal").addEventListener("input", () => {
-  const total = parseFloat(document.getElementById("requestTotal").value) || 0;
-  const amount = parseFloat(document.getElementById("requestAmount").value) || 0;
-  const balance = total - amount;
-  document.getElementById("formBalance").textContent = Math.max(balance, 0).toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2});
-});
 </script>
 
 </body>

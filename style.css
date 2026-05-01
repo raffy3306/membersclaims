@@ -135,7 +135,58 @@ body.login-page {
 .sidebar-btn .icon {
   font-size: 16px;
   width: 20px;
+  flex: 0 0 20px;
+  line-height: 1;
+  text-align: center;
 }
+
+.sidebar-btn .icon::before {
+  font-size: 16px;
+}
+
+.sidebar-btn[onclick*="navigateToAdmin('requests')"] .icon,
+.sidebar-btn[onclick*="navigateToAdmin('users')"] .icon,
+.sidebar-btn[onclick*="navigateToAdmin('settings')"] .icon,
+.sidebar-btn[onclick*="navigateToTeller('entry')"] .icon,
+.sidebar-btn[onclick*="navigateToTeller('submissions')"] .icon,
+.sidebar-btn[onclick*="navigateToTeller('history')"] .icon,
+.sidebar-btn[onclick*="navigateToTeller('notifications')"] .icon,
+.sidebar-btn[onclick*="navigateToBranch('review')"] .icon,
+.sidebar-btn[onclick*="navigateToBranch('dashboard')"] .icon,
+.sidebar-btn[onclick*="navigateToBranch('submitted')"] .icon,
+.sidebar-btn[onclick*="navigateToBranch('notifications')"] .icon,
+.sidebar-btn[onclick*="navigateToBranch('settings')"] .icon,
+.sidebar-btn[onclick*="navigateToFinance('approval')"] .icon,
+.sidebar-btn[onclick*="navigateToFinance('dashboard')"] .icon,
+.sidebar-btn[onclick*="navigateToFinance('audit')"] .icon,
+.sidebar-btn[onclick*="navigateToFinance('policies')"] .icon,
+.sidebar-btn[onclick*="navigateToFinance('reports')"] .icon,
+.sidebar-btn[onclick*="navigateToFinance('notifications')"] .icon,
+.sidebar-btn[onclick*="navigateToFinance('settings')"] .icon,
+.sidebar-btn[onclick*="logout()"] .icon {
+  font-size: 0;
+}
+
+.sidebar-btn[onclick*="navigateToAdmin('requests')"] .icon::before { content: "\1F4CB"; }
+.sidebar-btn[onclick*="navigateToAdmin('users')"] .icon::before { content: "\1F465"; }
+.sidebar-btn[onclick*="navigateToAdmin('settings')"] .icon::before,
+.sidebar-btn[onclick*="navigateToBranch('settings')"] .icon::before,
+.sidebar-btn[onclick*="navigateToFinance('settings')"] .icon::before { content: "\2699"; }
+.sidebar-btn[onclick*="navigateToTeller('entry')"] .icon::before { content: "\1F4DD"; }
+.sidebar-btn[onclick*="navigateToTeller('submissions')"] .icon::before { content: "\1F4C4"; }
+.sidebar-btn[onclick*="navigateToTeller('history')"] .icon::before { content: "\1F552"; }
+.sidebar-btn[onclick*="navigateToTeller('notifications')"] .icon::before,
+.sidebar-btn[onclick*="navigateToBranch('notifications')"] .icon::before,
+.sidebar-btn[onclick*="navigateToFinance('notifications')"] .icon::before { content: "\1F514"; }
+.sidebar-btn[onclick*="navigateToBranch('review')"] .icon::before,
+.sidebar-btn[onclick*="navigateToFinance('approval')"] .icon::before { content: "\2705"; }
+.sidebar-btn[onclick*="navigateToBranch('dashboard')"] .icon::before,
+.sidebar-btn[onclick*="navigateToFinance('dashboard')"] .icon::before { content: "\1F4CA"; }
+.sidebar-btn[onclick*="navigateToBranch('submitted')"] .icon::before { content: "\1F4C1"; }
+.sidebar-btn[onclick*="navigateToFinance('audit')"] .icon::before { content: "\1F4CB"; }
+.sidebar-btn[onclick*="navigateToFinance('policies')"] .icon::before { content: "\1F4C4"; }
+.sidebar-btn[onclick*="navigateToFinance('reports')"] .icon::before { content: "\1F4C8"; }
+.sidebar-btn[onclick*="logout()"] .icon::before { content: "\1F6AA"; }
 
 .badge-count {
   margin-left: auto;
@@ -470,6 +521,11 @@ tbody tr:last-child td {
   background: #f3f4f6;
 }
 
+.btn:disabled {
+  cursor: not-allowed;
+  opacity: 0.65;
+}
+
 .btn.blue {
   background: #2563eb;
   color: white;
@@ -693,6 +749,48 @@ tbody tr:last-child td {
 .checkbox-label input {
   width: 16px;
   height: 16px;
+}
+
+/* SEGMENTATION RATES */
+.segmentation-rates-container {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+  gap: 20px;
+  margin-bottom: 20px;
+}
+
+.rate-input-group {
+  display: flex;
+  flex-direction: column;
+}
+
+.rate-input-group label {
+  display: block;
+  margin-bottom: 8px;
+  font-size: 14px;
+  font-weight: 600;
+  color: #374151;
+}
+
+.input-group {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.input-group .form-control {
+  flex: 1;
+}
+
+.currency-symbol {
+  font-size: 14px;
+  color: #6b7280;
+  font-weight: 500;
+  white-space: nowrap;
+  padding: 10px 12px;
+  background: #f3f4f6;
+  border-radius: 8px;
+  border: 1px solid #d1d5db;
 }
 
 /* LOGIN PAGE */

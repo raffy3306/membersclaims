@@ -1,54 +1,1221 @@
-const API = "https://script.google.com/macros/s/AKfycbyfuQgCuZp3z91s4i-n40bBYNR_bdwxeUoxxcCQx-3JHiZ_zoLRykwOPgPyuTq6Kwbp/exec";
+const API = "https://script.google.com/macros/s/AKfycbxU015eGubQU_0JCWqOmIf2Khm2Tjn8Gi4fE5RxB6u9rczuiCK_t7jjv6v47gLd9Xz0Eg/exec";
+// Apps Script web apps reject CORS preflight OPTIONS requests, so POST JSON as plain text.
+const APPS_SCRIPT_JSON_HEADERS = { "Content-Type": "text/plain;charset=utf-8" };
+
+const SUPABASE_TABLES = {
+  users: "users",
+  hospitals: "hospitals",
+  claims: "hospitalizationclaims",
+  hospitalizationclaims: "hospitalizationclaims",
+  hcattachments: "hcattachments",
+  settings: "app_settings",
+  members: "members",
+  branches: "branches",
+  segmentationRates: "segmentation_rates"
+};
+
+const ROLE_LABELS = {
+  admin: "System Administrator",
+  crs: "CRS",
+  branch_manager: "Branch Managers",
+  membership_specialist: "Membership Recruitment and Development Specialist",
+  verifier: "Membership Recruitment and Development Specialist",
+  finance_head: "Finance and Accounting Head",
+  finance_manager: "Finance and Accounting Head",
+  approver: "Savings and Credit Head",
+  savings_credit_head: "Savings and Credit Head",
+};
+
+const ROLE_ALIASES = {
+  admin: "admin",
+  crs: "crs",
+  teller: "crs",
+  encoder: "crs",
+  customerrelationsspecialist: "crs",
+  branch_manager: "branch_manager",
+  branchmanager: "branch_manager",
+  membership_specialist: "membership_specialist",
+  membershipspecialist: "membership_specialist",
+  mrdspecialist: "membership_specialist",
+  verifier: "membership_specialist",
+  processor: "membership_specialist",
+  finance_head: "finance_head",
+  financehead: "finance_head",
+  financeaccountinghead: "finance_head",
+  financeandaccountinghead: "finance_head",
+  finance_manager: "finance_head",
+  financemanager: "finance_head",
+  checker: "finance_head",
+  savings_credit_head: "savings_credit_head",
+  savingscredithead: "savings_credit_head",
+  approver: "savings_credit_head",
+};
+
+const STATUS_LABELS = {
+  Pending: "For Branch Manager Review",
+  "Under Verification": "For Membership Specialist Review",
+  "Under Review": "For Finance Review",
+  Forwarded: "For Approval",
+  Returned: "Returned for Correction",
+  Approved: "Approved",
+  Rejected: "Rejected"
+};
+
+const MIN_ELIGIBLE_CONFINEMENT_DAYS = 3;
+const MAX_CLAIMS_PER_YEAR = 2;
+const YEARLY_CLAIM_COUNT_STATUSES = ["Pending", "Under Verification", "Under Review", "Forwarded", "Approved", "Returned"];
+
+const REQUEST_HEADERS = [
+  "ClaimID",
+  "MemberName",
+  "Gender",
+  "DaysComputed",
+  "DailyRate",
+  "ClaimableAmount",
+  "Hospital",
+  "Status",
+  "EncodedBy",
+  "VerifiedBy",
+  "ApprovedBy",
+  "DateStamp",
+  "ContactNumber",
+  "BranchId",
+  "Notes",
+  "FinanceCheckedBy",
+  "Attachments",
+  "MemberID",
+  "Segmentation",
+  "Branch",
+  "HospitalID",
+  "DateAdmitted",
+  "DateDischarged",
+  "ActualDaysConfined",
+  "Diagnosis"
+];
+
+function getSupabaseConfig() {
+  const config = window.SUPABASE_CONFIG || {};
+  const fallbackUrl = "https://qwoahwiozlqqdtshplay.supabase.co";
+  const configuredUrl = config.url && !config.url.includes("YOUR_SUPABASE")
+    ? config.url
+    : "";
+  const configuredAnonKey = config.anonKey && !config.anonKey.includes("YOUR_SUPABASE")
+    ? config.anonKey
+    : "";
+
+  return {
+    url: configuredUrl || window.SUPABASE_URL || fallbackUrl,
+    anonKey: configuredAnonKey || window.SUPABASE_ANON_KEY || ""
+  };
+}
+
+function getSupabaseClient() {
+  const config = getSupabaseConfig();
+
+  if (!window.supabase || typeof window.supabase.createClient !== "function") {
+    throw new Error("Supabase client library is not loaded. Check the script tag before app.js.");
+  }
+
+  if (
+    !config.url ||
+    !config.anonKey ||
+    config.url.includes("YOUR_SUPABASE") ||
+    config.anonKey.includes("YOUR_SUPABASE")
+  ) {
+    throw new Error("Supabase is not configured. Update supabase-config.js with your project URL and anon key.");
+  }
+
+  if (!window.membersClaimsSupabaseClient) {
+    window.membersClaimsSupabaseClient = window.supabase.createClient(config.url, config.anonKey);
+  }
+
+  return window.membersClaimsSupabaseClient;
+}
+
+function createApiResponse(payload) {
+  return new Response(JSON.stringify(payload), {
+    status: 200,
+    headers: { "Content-Type": "application/json" }
+  });
+}
+
+async function parseApiPayload(input, init = {}) {
+  if (init.body) {
+    return JSON.parse(init.body);
+  }
+
+  const url = new URL(typeof input === "string" ? input : input.url);
+  const payload = {};
+  url.searchParams.forEach((value, key) => {
+    payload[key] = value;
+  });
+  return payload;
+}
+
+function getFetchUrl(input) {
+  if (typeof input === "string") return input;
+  if (input && typeof input.url === "string") return input.url;
+  return "";
+}
+
+function callAppsScriptJsonp(payload, timeoutMs = 30000) {
+  return new Promise((resolve, reject) => {
+    const callbackName = `appsScriptCallback_${Date.now()}_${Math.random().toString(36).slice(2)}`;
+    const script = document.createElement("script");
+    const url = new URL(API);
+    let timeoutId;
+
+    function cleanup() {
+      clearTimeout(timeoutId);
+      delete window[callbackName];
+      script.remove();
+    }
+
+    window[callbackName] = data => {
+      cleanup();
+      resolve(data);
+    };
+
+    script.onerror = () => {
+      cleanup();
+      reject(new Error("Google Apps Script request failed."));
+    };
+
+    timeoutId = setTimeout(() => {
+      cleanup();
+      reject(new Error("Google Apps Script request timed out."));
+    }, timeoutMs);
+
+    url.searchParams.set("payload", JSON.stringify(payload));
+    url.searchParams.set("callback", callbackName);
+    script.src = url.toString();
+    document.body.appendChild(script);
+  });
+}
+
+function wait(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+async function submitAppsScriptWrite(payload, timeoutMs = 30000) {
+  await fetchWithTimeout(
+    API,
+    {
+      method: "POST",
+      mode: "no-cors",
+      body: JSON.stringify(payload)
+    },
+    timeoutMs,
+    "Google Apps Script write request timed out."
+  );
+}
+
+function normalizeEmail(email) {
+  return String(email || "").trim().toLowerCase();
+}
+
+function normalizeRole(role) {
+  const normalized = String(role || "").trim().toLowerCase();
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+  return ROLE_ALIASES[normalized] || ROLE_ALIASES[compact] || normalized;
+}
+
+function isRole(role, expectedRole) {
+  return normalizeRole(role) === expectedRole;
+}
+
+function getCurrentRole() {
+  return normalizeRole(localStorage.getItem("role"));
+}
+
+function getStatusLabel(status) {
+  return STATUS_LABELS[status] || status || "";
+}
+
+function pickField(source, names, fallback = "") {
+  for (const name of names) {
+    if (source && source[name] !== undefined && source[name] !== null) {
+      return source[name];
+    }
+  }
+  return fallback;
+}
+
+function normalizeAttachments(value) {
+  if (Array.isArray(value)) return value;
+  if (!value) return [];
+
+  try {
+    const parsed = typeof value === "string" ? JSON.parse(value) : value;
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    return [];
+  }
+}
+
+function readFileAsDataUrl(file) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = event => resolve(event.target.result);
+    reader.onerror = () => reject(reader.error || new Error("Unable to read file."));
+    reader.readAsDataURL(file);
+  });
+}
+
+async function readRequestAttachments(inputId = "requestAttachments") {
+  const input = document.getElementById(inputId);
+  const files = input && input.files ? Array.from(input.files) : [];
+
+  if (!files.length) return [];
+
+  return Promise.all(files.map(async file => ({
+    file_name: file.name,
+    file_type: file.type || "application/octet-stream",
+    file_size: file.size,
+    file_data: await readFileAsDataUrl(file)
+  })));
+}
+
+function calculateHospitalDays(dateAdmitted, dateDischarged) {
+  if (!dateAdmitted || !dateDischarged) {
+    return { actualDays: 0, payableDays: 0 };
+  }
+
+  const admitted = new Date(`${dateAdmitted}T00:00:00`);
+  const discharged = new Date(`${dateDischarged}T00:00:00`);
+
+  if (Number.isNaN(admitted.getTime()) || Number.isNaN(discharged.getTime()) || discharged < admitted) {
+    return { actualDays: 0, payableDays: 0 };
+  }
+
+  const millisecondsPerDay = 24 * 60 * 60 * 1000;
+  const actualDays = Math.floor((discharged - admitted) / millisecondsPerDay);
+  return {
+    actualDays,
+    payableDays: Math.min(actualDays, 10)
+  };
+}
+
+function getClaimYear(dateAdmitted) {
+  const date = dateAdmitted ? new Date(`${dateAdmitted}T00:00:00`) : new Date();
+  return Number.isNaN(date.getTime()) ? new Date().getFullYear() : date.getFullYear();
+}
+
+async function supabaseCountYearlyClaims(memberId, claimYear, excludedClaimId = "") {
+  const db = getSupabaseClient();
+  const { data, error } = await db
+    .from(SUPABASE_TABLES.claims)
+    .select("claim_id,claim_status,status")
+    .eq("member_id", memberId)
+    .eq("claim_year", claimYear);
+
+  if (error) throw error;
+
+  return (data || []).filter(claim => {
+    if (excludedClaimId && claim.claim_id === excludedClaimId) return false;
+    const status = claim.claim_status || claim.status || "";
+    return YEARLY_CLAIM_COUNT_STATUSES.includes(status);
+  }).length;
+}
+
+function requestToLegacyRow(request) {
+  const payableDays = Number(pickField(request, ["days_confined", "days_approved", "computed_days"], 0));
+  const dailyRate = Number(pickField(request, ["daily_rate", "rate_per_day"], 0));
+  const claimableAmount = Number(pickField(request, ["claimable_amount", "amount_approved", "claim_amount"], payableDays * dailyRate));
+  const attachments = normalizeAttachments(request.attachments || request.hcattachments);
+
+  return [
+    pickField(request, ["claim_id", "id", "request_id"], ""),
+    pickField(request, ["member_name", "fullname", "full_name", "patient_name"], ""),
+    pickField(request, ["gender"], ""),
+    payableDays,
+    dailyRate,
+    claimableAmount,
+    pickField(request, ["hospital_name", "hospital", "purpose", "diagnosis"], ""),
+    pickField(request, ["claim_status", "status"], "Pending"),
+    pickField(request, ["encoded_by", "processed_by", "created_by"], ""),
+    pickField(request, ["verified_by", "checked_by"], ""),
+    pickField(request, ["approved_by"], ""),
+    pickField(request, ["date_filed", "date_stamp", "claim_date", "created_at", "last_updated"], ""),
+    pickField(request, ["contact_number", "contact"], ""),
+    pickField(request, ["branch", "branch_id", "teller_branch_id", "branchid"], ""),
+    pickField(request, ["remarks", "notes"], ""),
+    pickField(request, ["finance_checked_by"], ""),
+    attachments,
+    pickField(request, ["member_id"], ""),
+    pickField(request, ["segmentation"], ""),
+    pickField(request, ["branch", "branch_id", "teller_branch_id", "branchid"], ""),
+    pickField(request, ["hospital_id"], ""),
+    pickField(request, ["date_admitted"], ""),
+    pickField(request, ["date_discharged"], ""),
+    Number(pickField(request, ["actual_days_confined", "days_after_discharged"], payableDays)),
+    pickField(request, ["diagnosis"], "")
+  ];
+}
+
+async function supabaseReplaceAttachments(claimId, attachments, uploadedBy) {
+  if (!Array.isArray(attachments)) return;
+
+  const db = getSupabaseClient();
+  const { error: deleteError } = await db
+    .from(SUPABASE_TABLES.hcattachments)
+    .delete()
+    .eq("claim_id", claimId);
+
+  if (deleteError) throw deleteError;
+  if (!attachments.length) return;
+
+  const rows = attachments.map(attachment => ({
+    claim_id: claimId,
+    file_name: attachment.file_name || attachment.name || "attachment",
+    file_type: attachment.file_type || attachment.type || "application/octet-stream",
+    file_size: Number(attachment.file_size || attachment.size || 0),
+    file_data: attachment.file_data || attachment.dataUrl || attachment.data_url || "",
+    uploaded_by: uploadedBy || ""
+  }));
+
+  const { error } = await db
+    .from(SUPABASE_TABLES.hcattachments)
+    .insert(rows);
+
+  if (error) throw error;
+}
+
+function userToSessionPayload(user) {
+  const firstLogin = Boolean(user.first_login || user.must_change_password);
+  const role = normalizeRole(user.role);
+
+  return {
+    success: true,
+    role,
+    user: user.email,
+    branchid: user.branchid || user.branch_id || "",
+    fullname: user.fullname || "",
+    position: user.position || getRoleLabel(role),
+    mustChangePassword: firstLogin
+  };
+}
+
+async function supabaseLogin(data) {
+  const db = getSupabaseClient();
+  const email = normalizeEmail(data.email);
+  const password = String(data.password || "").trim();
+
+  const { data: user, error } = await db
+    .from(SUPABASE_TABLES.users)
+    .select("*")
+    .eq("email", email)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!user || String(user.password || "").trim() !== password) {
+    return { success: false, message: "Invalid email or password." };
+  }
+
+  return userToSessionPayload(user);
+}
+
+async function supabaseChangePassword(data) {
+  const db = getSupabaseClient();
+  const email = normalizeEmail(data.email);
+  const currentPassword = String(data.currentPassword || "").trim();
+  const newPassword = String(data.newPassword || "").trim();
+
+  if (!email || !currentPassword || !newPassword) {
+    return { success: false, message: "Email, current password, and new password are required." };
+  }
+
+  if (newPassword.length < 8) {
+    return { success: false, message: "New password must be at least 8 characters long." };
+  }
+
+  if (newPassword === currentPassword) {
+    return { success: false, message: "New password must be different from the current password." };
+  }
+
+  const { data: user, error: findError } = await db
+    .from(SUPABASE_TABLES.users)
+    .select("email,password")
+    .eq("email", email)
+    .maybeSingle();
+
+  if (findError) throw findError;
+  if (!user) return { success: false, message: "User account not found." };
+  if (String(user.password || "").trim() !== currentPassword) {
+    return { success: false, message: "Current password is incorrect." };
+  }
+
+  const { error } = await db
+    .from(SUPABASE_TABLES.users)
+    .update({
+      password: newPassword,
+      first_login: false,
+      must_change_password: false,
+      updated_at: new Date().toISOString()
+    })
+    .eq("email", email);
+
+  if (error) throw error;
+
+  return { success: true, message: "Password updated successfully." };
+}
+
+async function supabaseForgotPassword(data) {
+  const db = getSupabaseClient();
+  const email = normalizeEmail(data.email);
+
+  if (!email) {
+    return { success: false, message: "Email is required." };
+  }
+
+  const { data: user, error } = await db
+    .from(SUPABASE_TABLES.users)
+    .select("email")
+    .eq("email", email)
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!user) return { success: false, message: "No account was found for that email address." };
+
+  return {
+    success: true,
+    message: "Account found. Please ask an admin to set a temporary password."
+  };
+}
+
+async function supabaseGetRequests() {
+  const db = getSupabaseClient();
+  const { data, error } = await db
+    .from(SUPABASE_TABLES.claims)
+    .select("*")
+    .order("date_filed", { ascending: false });
+
+  if (error) throw error;
+
+  let attachments = [];
+  const claimIds = (data || []).map(item => item.claim_id || item.id).filter(Boolean);
+
+  if (claimIds.length) {
+    const { data: attachmentRows, error: attachmentError } = await db
+      .from(SUPABASE_TABLES.hcattachments)
+      .select("*")
+      .in("claim_id", claimIds);
+
+    if (!attachmentError) {
+      attachments = attachmentRows || [];
+    }
+  }
+
+  const attachmentsByClaim = attachments.reduce((groups, attachment) => {
+    const claimId = attachment.claim_id;
+    if (!groups[claimId]) groups[claimId] = [];
+    groups[claimId].push(attachment);
+    return groups;
+  }, {});
+
+  return [
+    REQUEST_HEADERS,
+    ...(data || []).map(request => requestToLegacyRow({
+      ...request,
+      attachments: attachmentsByClaim[request.claim_id || request.id] || []
+    }))
+  ];
+}
+
+async function supabaseCreateRequest(data) {
+  const db = getSupabaseClient();
+  const days = calculateHospitalDays(data.dateAdmitted, data.dateDischarged);
+  const dailyRate = Number(data.dailyRate);
+  const hospitalId = data.hospitalID ? Number(data.hospitalID) : null;
+
+  if (!data.memberID || !data.memberName) {
+    return { success: false, message: "Please select a member from the member list." };
+  }
+
+  if (!hospitalId || Number.isNaN(hospitalId) || !data.hospitalName) {
+    return { success: false, message: "Please select the hospital where the member was confined." };
+  }
+
+  if (!data.dateAdmitted || !data.dateDischarged || days.actualDays <= 0) {
+    return { success: false, message: "Please enter valid admitted and discharged dates." };
+  }
+
+  if (days.actualDays < MIN_ELIGIBLE_CONFINEMENT_DAYS) {
+    return { success: false, message: `Hospital confinement must be at least ${MIN_ELIGIBLE_CONFINEMENT_DAYS} days to be eligible for a claim.` };
+  }
+
+  if (Number.isNaN(dailyRate) || dailyRate <= 0) {
+    return { success: false, message: "No daily rate is configured for this member's segmentation." };
+  }
+
+  const claimYear = getClaimYear(data.dateAdmitted);
+  const yearlyClaimCount = await supabaseCountYearlyClaims(data.memberID, claimYear);
+  if (yearlyClaimCount >= MAX_CLAIMS_PER_YEAR) {
+    return { success: false, message: `This member already has the maximum of ${MAX_CLAIMS_PER_YEAR} claims for ${claimYear}.` };
+  }
+
+  const claimableAmount = days.payableDays * dailyRate;
+  const now = new Date().toISOString();
+  const request = {
+    claim_id: data.request_id || generateID(),
+    date_filed: now,
+    member_id: data.memberID,
+    member_name: data.memberName || "",
+    contact_number: data.contactNumber || "",
+    branch: data.branch || data.tellerBranchId || "",
+    segmentation: data.segmentation || "",
+    hospital_id: hospitalId,
+    hospital_name: data.hospitalName || "",
+    date_admitted: data.dateAdmitted,
+    date_discharged: data.dateDischarged,
+    actual_days_confined: days.actualDays,
+    days_confined: days.payableDays,
+    daily_rate: dailyRate,
+    claimable_amount: claimableAmount,
+    days_approved: days.payableDays,
+    amount_approved: claimableAmount,
+    diagnosis: data.diagnosis || data.purpose || "",
+    claim_year: claimYear,
+    claim_status: "Pending",
+    status: "Pending",
+    processed_by: data.tellerName || data.tellerEmail || "",
+    encoded_by: data.tellerName || data.tellerEmail || "",
+    checked_by: "",
+    verified_by: "",
+    finance_checked_by: "",
+    approved_by: "",
+    remarks: "",
+    last_updated: now,
+    last_updated_by: data.tellerEmail || data.tellerName || ""
+  };
+
+  const { error } = await db
+    .from(SUPABASE_TABLES.claims)
+    .insert(request);
+
+  if (error) throw error;
+
+  await supabaseReplaceAttachments(request.claim_id, data.attachments || [], data.tellerEmail || data.tellerName || "");
+
+  return { success: true, request_id: request.claim_id };
+}
+
+async function supabaseEditRequest(data) {
+  const db = getSupabaseClient();
+  const requestId = data.request_id;
+  const days = calculateHospitalDays(data.dateAdmitted, data.dateDischarged);
+  const dailyRate = Number(data.dailyRate);
+  const hospitalId = data.hospitalID ? Number(data.hospitalID) : null;
+
+  if (!data.memberID || !data.memberName) {
+    return { success: false, message: "Please select a member from the member list." };
+  }
+
+  if (!hospitalId || Number.isNaN(hospitalId) || !data.hospitalName) {
+    return { success: false, message: "Please select the hospital where the member was confined." };
+  }
+
+  if (!data.dateAdmitted || !data.dateDischarged || days.actualDays <= 0) {
+    return { success: false, message: "Please enter valid admitted and discharged dates." };
+  }
+
+  if (days.actualDays < MIN_ELIGIBLE_CONFINEMENT_DAYS) {
+    return { success: false, message: `Hospital confinement must be at least ${MIN_ELIGIBLE_CONFINEMENT_DAYS} days to be eligible for a claim.` };
+  }
+
+  if (Number.isNaN(dailyRate) || dailyRate <= 0) {
+    return { success: false, message: "No daily rate is configured for this member's segmentation." };
+  }
+
+  const { data: existing, error: findError } = await db
+    .from(SUPABASE_TABLES.claims)
+    .select("claim_id,claim_status,status")
+    .eq("claim_id", requestId)
+    .maybeSingle();
+
+  if (findError) throw findError;
+  if (!existing) return { success: false, message: "Request not found." };
+  if ((existing.claim_status || existing.status) !== "Returned") {
+    return { success: false, message: "Only returned requests can be edited." };
+  }
+
+  const claimYear = getClaimYear(data.dateAdmitted);
+  const yearlyClaimCount = await supabaseCountYearlyClaims(data.memberID, claimYear, requestId);
+  if (yearlyClaimCount >= MAX_CLAIMS_PER_YEAR) {
+    return { success: false, message: `This member already has the maximum of ${MAX_CLAIMS_PER_YEAR} claims for ${claimYear}.` };
+  }
+
+  const claimableAmount = days.payableDays * dailyRate;
+  const now = new Date().toISOString();
+  const updates = {
+    member_id: data.memberID,
+    member_name: data.memberName || "",
+    contact_number: data.contactNumber || "",
+    branch: data.branch || data.tellerBranchId || "",
+    segmentation: data.segmentation || "",
+    hospital_id: hospitalId,
+    hospital_name: data.hospitalName || "",
+    date_admitted: data.dateAdmitted,
+    date_discharged: data.dateDischarged,
+    actual_days_confined: days.actualDays,
+    days_confined: days.payableDays,
+    daily_rate: dailyRate,
+    claimable_amount: claimableAmount,
+    days_approved: days.payableDays,
+    amount_approved: claimableAmount,
+    diagnosis: data.diagnosis || data.purpose || "",
+    claim_year: claimYear,
+    claim_status: "Pending",
+    status: "Pending",
+    checked_by: "",
+    verified_by: "",
+    finance_checked_by: "",
+    approved_by: "",
+    remarks: "",
+    last_updated: now,
+    last_updated_by: data.tellerEmail || data.tellerName || ""
+  };
+
+  const { error } = await db
+    .from(SUPABASE_TABLES.claims)
+    .update(updates)
+    .eq("claim_id", requestId);
+
+  if (error) throw error;
+
+  if (Array.isArray(data.attachments) && data.attachments.length) {
+    await supabaseReplaceAttachments(requestId, data.attachments, data.tellerEmail || data.tellerName || "");
+  }
+
+  return { success: true };
+}
+
+async function supabaseUpdateStatus(data) {
+  const db = getSupabaseClient();
+  const role = normalizeRole(data.role);
+  const updates = {
+    claim_status: data.status,
+    status: data.status,
+    last_updated: data.dateStamp || new Date().toISOString(),
+    last_updated_by: data.financeManagerEmail || data.branchManagerEmail || data.tellerEmail || ""
+  };
+
+  if (role === "branch_manager") {
+    updates.checked_by = data.branchManagerName || data.branchManagerEmail || "";
+    updates.verified_by = data.branchManagerName || data.branchManagerEmail || "";
+  }
+
+  if (role === "membership_specialist") {
+    updates.checked_by = data.financeManagerName || data.financeManagerEmail || "";
+    updates.verified_by = data.financeManagerName || data.financeManagerEmail || "";
+  }
+
+  if (role === "finance_head") {
+    updates.finance_checked_by = data.financeManagerName || data.financeManagerEmail || "";
+  }
+
+  if (role === "savings_credit_head") {
+    updates.approved_by = data.status === "Approved" || data.status === "Rejected"
+      ? data.financeManagerName || data.financeManagerEmail || ""
+      : "";
+  }
+
+  if (typeof data.notes !== "undefined") {
+    updates.remarks = data.notes || "";
+  }
+
+  const { data: updated, error } = await db
+    .from(SUPABASE_TABLES.claims)
+    .update(updates)
+    .eq("claim_id", data.request_id)
+    .select("claim_id")
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!updated) return { success: false, message: "Request not found." };
+
+  return { success: true };
+}
+
+async function supabaseGetDashboardCounts() {
+  const rows = await supabaseGetRequests();
+  let awaiting = 0;
+  let approved = 0;
+  let rejected = 0;
+  let review = 0;
+
+  const currentMonth = new Date().getMonth();
+  const currentYear = new Date().getFullYear();
+
+  for (let i = 1; i < rows.length; i++) {
+    const row = rows[i];
+    const status = row[7];
+    const date = new Date(row[11]);
+
+    if (status === "Pending" || status === "Forwarded") awaiting++;
+    if (status === "Under Review") review++;
+
+    if (!Number.isNaN(date.getTime()) && date.getMonth() === currentMonth && date.getFullYear() === currentYear) {
+      if (status === "Approved") approved++;
+      if (status === "Rejected") rejected++;
+    }
+  }
+
+  return { awaiting, approved, rejected, review };
+}
+
+async function supabaseGetSettings() {
+  const db = getSupabaseClient();
+  const { data, error } = await db
+    .from(SUPABASE_TABLES.settings)
+    .select("key,value");
+
+  if (error) throw error;
+
+  const settings = {};
+  (data || []).forEach(row => {
+    if (row.key) settings[row.key] = row.value || "";
+  });
+
+  return {
+    success: true,
+    settings: {
+      tellerName: settings.tellerName || "",
+      branchManagerName: settings.branchManagerName || "",
+      financeManagerName: settings.financeManagerName || "",
+      membershipSpecialistName: settings.membershipSpecialistName || settings.branchManagerName || "",
+      financeHeadName: settings.financeHeadName || "",
+      savingsCreditHeadName: settings.savingsCreditHeadName || settings.financeManagerName || "",
+      tellerSignatureData: settings.tellerSignatureData || "",
+      branchManagerSignatureData: settings.branchManagerSignatureData || "",
+      financeManagerSignatureData: settings.financeManagerSignatureData || "",
+      membershipSpecialistSignatureData: settings.membershipSpecialistSignatureData || settings.branchManagerSignatureData || "",
+      financeHeadSignatureData: settings.financeHeadSignatureData || "",
+      savingsCreditHeadSignatureData: settings.savingsCreditHeadSignatureData || settings.financeManagerSignatureData || "",
+      reportHeaderImage: settings.reportHeaderImage || ""
+    }
+  };
+}
+
+async function supabaseSaveSettings(settings) {
+  const db = getSupabaseClient();
+  const rows = Object.keys(settings || {}).map(key => ({
+    key,
+    value: settings[key] || "",
+    updated_at: new Date().toISOString()
+  }));
+
+  if (!rows.length) return { success: true };
+
+  const { error } = await db
+    .from(SUPABASE_TABLES.settings)
+    .upsert(rows, { onConflict: "key" });
+
+  if (error) throw error;
+  return { success: true };
+}
+
+async function supabaseSaveSignature(data) {
+  const signatureKeyMap = {
+    teller: "tellerSignatureData",
+    branchManager: "branchManagerSignatureData",
+    financeManager: "financeManagerSignatureData",
+    membershipSpecialist: "membershipSpecialistSignatureData",
+    financeHead: "financeHeadSignatureData",
+    savingsCreditHead: "savingsCreditHeadSignatureData"
+  };
+
+  const key = signatureKeyMap[data.role];
+  if (!key) return { success: false, message: "Invalid signature role." };
+
+  return supabaseSaveSettings({
+    [key]: `data:${data.mimeType};base64,${data.fileBase64}`
+  });
+}
+
+async function supabaseGetUsers() {
+  const db = getSupabaseClient();
+  const { data, error } = await db
+    .from(SUPABASE_TABLES.users)
+    .select("*")
+    .order("fullname", { ascending: true });
+
+  if (error) throw error;
+
+  return {
+    success: true,
+    users: (data || []).map(user => ({
+      email: user.email || "",
+      role: normalizeRole(user.role),
+      fullname: user.fullname || "",
+      position: user.position || "",
+      branchid: user.branchid || user.branch_id || "",
+      firstLogin: Boolean(user.first_login || user.must_change_password)
+    }))
+  };
+}
+
+async function supabaseCreateUser(data) {
+  const db = getSupabaseClient();
+  const email = normalizeEmail(data.email);
+  const password = String(data.password || "").trim();
+  const role = normalizeRole(data.role);
+  const fullname = String(data.fullname || "").trim();
+  const position = String(data.position || "").trim();
+  const branchid = String(data.branchid || "").trim();
+  const firstLogin = typeof data.firstLogin === "boolean" ? data.firstLogin : true;
+
+  if (!email || !password || !role || !fullname || !position) {
+    return { success: false, message: "Email, password, role, fullname, and position are required." };
+  }
+
+  const { data: existing, error: findError } = await db
+    .from(SUPABASE_TABLES.users)
+    .select("email")
+    .eq("email", email)
+    .maybeSingle();
+
+  if (findError) throw findError;
+  if (existing) return { success: false, message: "A user with this email already exists." };
+
+  const { error } = await db
+    .from(SUPABASE_TABLES.users)
+    .insert({
+      email,
+      password,
+      role,
+      fullname,
+      position,
+      branchid,
+      first_login: firstLogin,
+      must_change_password: firstLogin
+    });
+
+  if (error) throw error;
+  return { success: true };
+}
+
+async function supabaseUpdateUser(data) {
+  const db = getSupabaseClient();
+  const originalEmail = normalizeEmail(data.originalEmail);
+  const email = normalizeEmail(data.email);
+  const password = String(data.password || "").trim();
+  const role = normalizeRole(data.role);
+  const fullname = String(data.fullname || "").trim();
+  const position = String(data.position || "").trim();
+  const branchid = String(data.branchid || "").trim();
+  const firstLogin = typeof data.firstLogin === "boolean" ? data.firstLogin : true;
+
+  if (!originalEmail || !email || !role || !fullname || !position) {
+    return { success: false, message: "Original email, email, role, fullname, and position are required." };
+  }
+
+  if (email !== originalEmail) {
+    const { data: existing, error: findError } = await db
+      .from(SUPABASE_TABLES.users)
+      .select("email")
+      .eq("email", email)
+      .maybeSingle();
+
+    if (findError) throw findError;
+    if (existing) return { success: false, message: "Another user already uses this email address." };
+  }
+
+  const updates = {
+    email,
+    role,
+    fullname,
+    position,
+    branchid,
+    first_login: firstLogin,
+    must_change_password: firstLogin,
+    updated_at: new Date().toISOString()
+  };
+
+  if (password) updates.password = password;
+
+  const { data: updated, error } = await db
+    .from(SUPABASE_TABLES.users)
+    .update(updates)
+    .eq("email", originalEmail)
+    .select("email")
+    .maybeSingle();
+
+  if (error) throw error;
+  if (!updated) return { success: false, message: "User account not found." };
+
+  return { success: true };
+}
+
+async function supabaseGetMembers() {
+  const db = getSupabaseClient();
+  const { data, error } = await db
+    .from(SUPABASE_TABLES.members)
+    .select("*")
+    .order("full_name", { ascending: true });
+
+  if (error) throw error;
+
+  return {
+    success: true,
+    members: (data || []).map(member => ({
+      memberID: member.member_id || "",
+      fullName: member.full_name || "",
+      address: member.address || "",
+      contactNumber: member.contact_number || "",
+      branch: member.branch || "",
+      segmentation: member.segmentation || "",
+      gender: member.gender || "",
+      status: member.status || ""
+    }))
+  };
+}
+
+async function supabaseGetBranches() {
+  const db = getSupabaseClient();
+  const { data, error } = await db
+    .from(SUPABASE_TABLES.branches)
+    .select("*")
+    .order("branch_name", { ascending: true });
+
+  if (error) throw error;
+
+  return {
+    success: true,
+    branches: (data || []).map(branch => ({
+      branchID: branch.branch_id || branch.branchid || branch.id || "",
+      branchName: branch.branch_name || branch.branchname || branch.name || branch.branch_id || ""
+    }))
+  };
+}
+
+async function supabaseGetHospitals() {
+  const db = getSupabaseClient();
+  const { data, error } = await db
+    .from(SUPABASE_TABLES.hospitals)
+    .select("*")
+    .eq("status", "Active")
+    .order("name", { ascending: true });
+
+  if (error) throw error;
+
+  return {
+    success: true,
+    hospitals: (data || []).map(hospital => ({
+      id: hospital.id,
+      name: hospital.name || "",
+      address: hospital.address || "",
+      contactNumber: hospital.contact_number || "",
+      status: hospital.status || ""
+    }))
+  };
+}
+
+async function supabaseGetSegmentationRates() {
+  const db = getSupabaseClient();
+  const { data, error } = await db
+    .from(SUPABASE_TABLES.segmentationRates)
+    .select("*")
+    .order("segmentation", { ascending: true });
+
+  if (error) throw error;
+
+  return {
+    success: true,
+    rates: (data || []).map(rate => ({
+      segmentation: rate.segmentation || "",
+      dailyRate: Number(rate.daily_rate || 0),
+      description: rate.description || ""
+    }))
+  };
+}
+
+async function handleSupabaseAction(payload) {
+  switch (payload.action) {
+    case "login":
+      return supabaseLogin(payload);
+    case "changePassword":
+      return supabaseChangePassword(payload);
+    case "forgotPassword":
+      return supabaseForgotPassword(payload);
+    case "createRequest":
+      return supabaseCreateRequest(payload);
+    case "editRequest":
+      return supabaseEditRequest(payload);
+    case "getRequests":
+      return supabaseGetRequests(payload);
+    case "updateStatus":
+      return supabaseUpdateStatus(payload);
+    case "getDashboardCounts":
+      return supabaseGetDashboardCounts(payload);
+    case "getSettings":
+      return supabaseGetSettings(payload);
+    case "saveSettings":
+      return supabaseSaveSettings(payload.settings);
+    case "saveSignature":
+      return supabaseSaveSignature(payload);
+    case "getUsers":
+      return supabaseGetUsers(payload);
+    case "createUser":
+      return supabaseCreateUser(payload);
+    case "updateUser":
+      return supabaseUpdateUser(payload);
+    case "getMembers":
+      return supabaseGetMembers(payload);
+    case "getBranches":
+      return supabaseGetBranches(payload);
+    case "getHospitals":
+      return supabaseGetHospitals(payload);
+    case "getSegmentationRates":
+      return supabaseGetSegmentationRates(payload);
+    default:
+      return { success: false, message: `Unknown action: ${String(payload.action || "")}` };
+  }
+}
+
+(function installSupabaseApiShim() {
+  if (window.USE_SUPABASE_BACKEND !== true) {
+    return;
+  }
+
+  const nativeFetch = window.fetch.bind(window);
+
+  window.fetch = async function supabaseApiFetch(input, init = {}) {
+    const url = getFetchUrl(input);
+    if (!url.startsWith(API)) {
+      return nativeFetch(input, init);
+    }
+
+    try {
+      const payload = await parseApiPayload(input, init);
+      const result = await handleSupabaseAction(payload);
+      return createApiResponse(result);
+    } catch (err) {
+      console.error("Supabase API error:", err);
+      return createApiResponse({
+        success: false,
+        message: err && err.message ? err.message : "Supabase request failed."
+      });
+    }
+  };
+})();
 
 let pendingLoginData = null;
 let editingRequestId = null;
 let allUsers = [];
+let allMembers = [];
+let allBranches = [];
+let allHospitals = [];
+let segmentationRates = {};
 let editingUserEmail = null;
 
 function getRoleLabel(role) {
-  return role === "admin"
-    ? "System Administrator"
-    : role === "branch_manager"
-      ? "Branch Manager"
-      : role === "finance_manager"
-        ? "Savings and Credit Head"
-        : "Teller";
+  return ROLE_LABELS[normalizeRole(role)] || "User";
 }
 
 function persistSession(data) {
   const fullname = data.fullname || (data.user && typeof data.user === "object" ? data.user.fullname || data.user.name : data.user) || "User";
-  const position = data.position || getRoleLabel(data.role);
+  const role = normalizeRole(data.role);
+  const position = data.position || getRoleLabel(role);
   const branchid = data.branchid || "";
 
   localStorage.setItem("user", typeof data.user === "object" ? JSON.stringify(data.user) : data.user);
-  localStorage.setItem("role", data.role);
+  localStorage.setItem("role", role);
   localStorage.setItem("fullname", fullname);
   localStorage.setItem("position", position);
   localStorage.setItem("branchid", branchid);
 }
 
 function redirectToDashboard(role) {
-  if (role === "teller") window.location.href = "teller.html";
-  else if (role === "branch_manager") window.location.href = "branch.html";
-  else if (role === "finance_manager") window.location.href = "finance.html";
-  else if (role === "admin") window.location.href = "admin.html";
+  const normalizedRole = normalizeRole(role);
+  if (normalizedRole === "crs") {
+    window.location.href = "teller.html";
+    return true;
+  }
+  if (normalizedRole === "branch_manager" || normalizedRole === "membership_specialist") {
+    window.location.href = "branch.html";
+    return true;
+  }
+  if (normalizedRole === "finance_head") {
+    window.location.href = "finance.html";
+    return true;
+  }
+  if (normalizedRole === "savings_credit_head") {
+    window.location.href = "approver.html";
+    return true;
+  }
+  if (normalizedRole === "admin") {
+    window.location.href = "admin.html";
+    return true;
+  }
+
+  return false;
+}
+
+function describeApiParseError(text) {
+  const body = String(text || "");
+  const missingFunctionMatch = body.match(/script function:\s*(doGet|doPost)/i);
+
+  if (missingFunctionMatch) {
+    return `Google Apps Script deployment is not updated. The live web app is missing ${missingFunctionMatch[1]}. Paste the updated GoogleAppsScript.gs code into Apps Script and redeploy a new web app version.`;
+  }
+
+  if (body.includes("<html") || body.includes("<!DOCTYPE")) {
+    return "Google Apps Script returned an HTML error page instead of JSON. Open the deployment URL directly to view the Apps Script error.";
+  }
+
+  return "The backend returned an unexpected response instead of JSON.";
+}
+
+async function parseApiJsonResponse(response) {
+  const text = await response.text();
+
+  try {
+    return JSON.parse(text);
+  } catch (err) {
+    throw new Error(describeApiParseError(text));
+  }
 }
 
 // 🔐 LOGIN
+function fetchWithTimeout(input, init = {}, timeoutMs = 30000, timeoutMessage = "Request timed out. Please try again.") {
+  const controller = typeof AbortController !== "undefined" ? new AbortController() : null;
+  const options = controller ? { ...init, signal: controller.signal } : init;
+  let timeoutId;
+
+  const timeout = new Promise((_, reject) => {
+    timeoutId = setTimeout(() => {
+      if (controller) controller.abort();
+      reject(new Error(timeoutMessage));
+    }, timeoutMs);
+  });
+
+  return Promise.race([fetch(input, options), timeout])
+    .finally(() => clearTimeout(timeoutId));
+}
+
 async function login() {
   const email = document.getElementById("email").value.trim();
   const password = document.getElementById("password").value;
+  const loginButton = document.getElementById("loginButton");
+  const originalButtonText = loginButton ? loginButton.textContent : "";
 
   if (!email || !password) {
     alert("Please enter your email and password.");
     return;
   }
 
-  const url = `${API}?action=login&email=${encodeURIComponent(email)}&password=${encodeURIComponent(password)}`;
-
   try {
-    const res = await fetch(url);
-    const data = await res.json();
+    if (loginButton) {
+      loginButton.disabled = true;
+      loginButton.textContent = "Signing in...";
+    }
+
+    const data = await callAppsScriptJsonp({
+      action: "login",
+      email,
+      password
+    });
 
     console.log(data);
 
@@ -67,14 +1234,21 @@ async function login() {
       }
 
       persistSession(data);
-      redirectToDashboard(data.role);
+      if (!redirectToDashboard(data.role)) {
+        alert(`Your account role "${data.role || "unknown"}" is not assigned to a dashboard. Please contact an admin.`);
+      }
     } else {
-      alert("Invalid email or password");
+      alert(data.message || "Invalid email or password");
     }
 
   } catch (err) {
     console.error(err);
-    alert("Connection error. Check your API URL.");
+    alert(err.message || "Connection error. Check your Google Apps Script deployment and internet connection.");
+  } finally {
+    if (loginButton) {
+      loginButton.disabled = false;
+      loginButton.textContent = originalButtonText || "Sign In";
+    }
   }
 }
 
@@ -144,16 +1318,21 @@ async function submitFirstLoginPasswordChange() {
   }
 
   try {
-    const res = await fetch(API, {
-      method: "POST",
-      body: JSON.stringify({
-        action: "changePassword",
-        email,
-        currentPassword,
-        newPassword
-      })
-    });
-    const data = await res.json();
+    const res = await fetchWithTimeout(
+      API,
+      {
+        method: "POST",
+        body: JSON.stringify({
+          action: "changePassword",
+          email,
+          currentPassword,
+          newPassword
+        })
+      },
+      30000,
+      "Password update timed out. Please check your connection and try again."
+    );
+    const data = await parseApiJsonResponse(res);
 
     if (!data.success) {
       alert(data.message || "Unable to change password.");
@@ -164,10 +1343,12 @@ async function submitFirstLoginPasswordChange() {
     closeFirstLoginPasswordModal();
     pendingLoginData = null;
     alert("Password changed successfully. You can now continue.");
-    redirectToDashboard(localStorage.getItem("role"));
+    if (!redirectToDashboard(localStorage.getItem("role"))) {
+      alert("Your account role is not assigned to a dashboard. Please contact an admin.");
+    }
   } catch (err) {
     console.error(err);
-    alert("Connection error. Check your API URL.");
+    alert(err.message || "Connection error. Check your Google Apps Script deployment and internet connection.");
   }
 }
 
@@ -206,22 +1387,23 @@ async function requestPasswordReset() {
   try {
     const res = await fetch(API, {
       method: "POST",
+      headers: APPS_SCRIPT_JSON_HEADERS,
       body: JSON.stringify({
         action: "forgotPassword",
         email: email
       })
     });
-    const data = await res.json();
+    const data = await parseApiJsonResponse(res);
 
     if (data.success) {
-      alert("Password reset instructions have been sent to your email.");
+      alert(data.message || "Password reset instructions have been sent to your email.");
       closeForgotPasswordModal();
     } else {
       alert(data.message || "Unable to process your request.");
     }
   } catch (err) {
     console.error(err);
-    alert("Connection error. Check your API URL.");
+    alert(err.message || "Connection error. Check your Google Apps Script deployment and internet connection.");
   }
 }
 
@@ -235,9 +1417,10 @@ function logout() {
 }
 
 function loadUserProfile() {
-  const fullname = localStorage.getItem("fullname") || "Teller";
+  const role = getCurrentRole();
+  const fullname = localStorage.getItem("fullname") || getRoleLabel(role);
   const email = localStorage.getItem("user") || "user@example.com";
-  const position = localStorage.getItem("position") || "Teller";
+  const position = localStorage.getItem("position") || getRoleLabel(role);
 
   const fullNameEl = document.getElementById("userFullName");
   const emailEl = document.getElementById("userEmail");
@@ -252,11 +1435,18 @@ function setDashboardUserDetails() {
   loadUserProfile();
 }
 
-function openRequestModal() {
+async function openRequestModal() {
   const modal = document.getElementById("requestModal");
   resetRequestForm();
   if (modal) {
     modal.style.display = "flex";
+  }
+
+  if (!allMembers.length || !allHospitals.length || !Object.keys(segmentationRates).length) {
+    await loadTellerReferenceData().catch(err => console.warn("Unable to refresh teller reference data:", err));
+  } else {
+    renderTellerReferenceOptions();
+    updateClaimComputation();
   }
 }
 
@@ -268,28 +1458,242 @@ function closeRequestModal() {
   resetRequestForm();
 }
 
+function setInputValue(id, value) {
+  const element = document.getElementById(id);
+  if (element) element.value = value ?? "";
+}
+
+function setTextValue(id, value) {
+  const element = document.getElementById(id);
+  if (element) element.textContent = value ?? "";
+}
+
+function formatNumber(value) {
+  return (parseFloat(value) || 0).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+}
+
+function getDailyRateForSegmentation(segmentation) {
+  const normalized = normalizeRateKey(segmentation);
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+  return Number(segmentationRates[normalized] || segmentationRates[compact] || 0);
+}
+
+function normalizeRateKey(value) {
+  return normalizeValue(value).replace(/\s+segmentation$/i, "");
+}
+
+function getBranchName(branchIdOrName) {
+  const normalized = normalizeValue(branchIdOrName);
+  if (!normalized) return "";
+
+  const branch = allBranches.find(item =>
+    normalizeValue(item.branchID) === normalized ||
+    normalizeValue(item.branchName) === normalized
+  );
+
+  return branch ? branch.branchName : String(branchIdOrName || "");
+}
+
+function getRequestBranchName(request) {
+  if (!Array.isArray(request)) return "";
+  return getBranchName(request[13]) || getBranchName(request[19]) || request[19] || request[13] || "";
+}
+
+function findMemberByInput(value) {
+  const normalized = normalizeValue(value);
+  if (!normalized) return null;
+
+  return allMembers.find(member => {
+    const label = `${member.fullName} (${member.memberID})`;
+    return normalizeValue(member.fullName) === normalized ||
+      normalizeValue(member.memberID) === normalized ||
+      normalizeValue(label) === normalized;
+  }) || null;
+}
+
+function getSelectedRequestMember() {
+  const memberId = document.getElementById("requestMemberId")?.value || "";
+  if (memberId) {
+    const selected = allMembers.find(member => member.memberID === memberId);
+    if (selected) return selected;
+  }
+
+  return findMemberByInput(document.getElementById("requestMember")?.value || "");
+}
+
+function renderTellerReferenceOptions() {
+  const memberOptions = document.getElementById("memberOptions");
+  if (memberOptions) {
+    memberOptions.innerHTML = allMembers
+      .map(member => `<option value="${escapeHtml(`${member.fullName} (${member.memberID})`)}"></option>`)
+      .join("");
+  }
+
+  const hospitalSelect = document.getElementById("requestHospital");
+  if (hospitalSelect) {
+    const currentValue = hospitalSelect.value;
+    if (!allHospitals.length) {
+      hospitalSelect.innerHTML = '<option value="">No hospitals found</option>';
+    } else {
+      hospitalSelect.innerHTML = '<option value="">Select hospital</option>' +
+        allHospitals
+          .map(hospital => `<option value="${escapeHtml(hospital.id)}">${escapeHtml(hospital.name)}</option>`)
+          .join("");
+      hospitalSelect.value = allHospitals.some(hospital => String(hospital.id) === String(currentValue))
+        ? currentValue
+        : "";
+    }
+  }
+}
+
+async function loadTellerReferenceData() {
+  const hospitalSelect = document.getElementById("requestHospital");
+  if (hospitalSelect && !allHospitals.length) {
+    hospitalSelect.innerHTML = '<option value="">Loading hospitals...</option>';
+  }
+
+  const [membersRes, branchesRes, hospitalsRes, ratesRes] = await Promise.all([
+    fetch(API, { method: "POST", body: JSON.stringify({ action: "getMembers" }) }),
+    fetch(API, { method: "POST", body: JSON.stringify({ action: "getBranches" }) }),
+    fetch(API, { method: "POST", body: JSON.stringify({ action: "getHospitals" }) }),
+    fetch(API, { method: "POST", body: JSON.stringify({ action: "getSegmentationRates" }) })
+  ]);
+
+  const [membersData, branchesData, hospitalsData, ratesData] = await Promise.all([
+    parseApiJsonResponse(membersRes),
+    parseApiJsonResponse(branchesRes),
+    parseApiJsonResponse(hospitalsRes),
+    parseApiJsonResponse(ratesRes)
+  ]);
+
+  if (membersData.success) allMembers = membersData.members || [];
+  else console.warn("Unable to load members:", membersData.message);
+
+  if (branchesData.success) {
+    allBranches = (branchesData.branches || [])
+      .filter(branch => branch && (branch.branchID || branch.branchName))
+      .map(branch => ({
+        branchID: String(branch.branchID || branch.branchName || "").trim(),
+        branchName: String(branch.branchName || branch.branchID || "").trim()
+      }))
+      .sort((a, b) => String(a.branchName).localeCompare(String(b.branchName)));
+  }
+  else console.warn("Unable to load branches:", branchesData.message);
+
+  if (hospitalsData.success) {
+    allHospitals = (hospitalsData.hospitals || [])
+      .filter(hospital => hospital && hospital.name)
+      .sort((a, b) => String(a.name).localeCompare(String(b.name)));
+  }
+  else console.warn("Unable to load hospitals:", hospitalsData.message);
+
+  if (ratesData.success) {
+    segmentationRates = {};
+    (ratesData.rates || []).forEach(rate => {
+      if (rate.segmentation) {
+        const normalized = normalizeRateKey(rate.segmentation);
+        segmentationRates[normalized] = Number(rate.dailyRate || 0);
+        segmentationRates[normalized.replace(/[^a-z0-9]/g, "")] = Number(rate.dailyRate || 0);
+      }
+    });
+  } else {
+    console.warn("Unable to load segmentation rates:", ratesData.message);
+  }
+
+  renderTellerReferenceOptions();
+  const selectedMember = getSelectedRequestMember();
+  if (selectedMember) {
+    setInputValue("requestBranch", selectedMember.branchName || getBranchName(selectedMember.branch) || selectedMember.branch || "");
+  }
+  updateClaimComputation();
+}
+
+function setRequestMember(member) {
+  setInputValue("requestMemberId", member?.memberID || "");
+  setInputValue("requestMember", member ? `${member.fullName} (${member.memberID})` : "");
+  setInputValue("requestContact", member?.contactNumber || "");
+  setInputValue("requestGender", member?.gender || "");
+  setInputValue("requestSegmentation", member?.segmentation || "");
+  setInputValue("requestBranch", member?.branchName || getBranchName(member?.branch) || member?.branch || "");
+  updateClaimComputation();
+}
+
+function handleRequestMemberInput() {
+  const member = findMemberByInput(document.getElementById("requestMember")?.value || "");
+  if (member) {
+    setRequestMember(member);
+    return;
+  }
+
+  setInputValue("requestMemberId", "");
+  setInputValue("requestContact", "");
+  setInputValue("requestGender", "");
+  setInputValue("requestSegmentation", "");
+  setInputValue("requestBranch", "");
+  updateClaimComputation();
+}
+
+function updateClaimComputation() {
+  const dateAdmitted = document.getElementById("requestDateAdmitted")?.value || "";
+  const dateDischarged = document.getElementById("requestDateDischarged")?.value || "";
+  const segmentation = document.getElementById("requestSegmentation")?.value || "";
+  const days = calculateHospitalDays(dateAdmitted, dateDischarged);
+  const dailyRate = getDailyRateForSegmentation(segmentation);
+  const claimableAmount = days.payableDays * dailyRate;
+
+  setTextValue("actualDaysConfined", String(days.actualDays));
+  setTextValue("computedDaysConfined", String(days.payableDays));
+  setTextValue("ratePerDay", formatNumber(dailyRate));
+  setTextValue("totalClaimableAmount", formatNumber(claimableAmount));
+}
+
+function bindTellerClaimForm() {
+  const memberInput = document.getElementById("requestMember");
+  if (memberInput && !memberInput.dataset.claimBound) {
+    memberInput.addEventListener("input", handleRequestMemberInput);
+    memberInput.dataset.claimBound = "true";
+  }
+
+  ["requestDateAdmitted", "requestDateDischarged"].forEach(id => {
+    const input = document.getElementById(id);
+    if (input && !input.dataset.claimBound) {
+      input.addEventListener("input", updateClaimComputation);
+      input.dataset.claimBound = "true";
+    }
+  });
+}
+
 function resetRequestForm() {
   editingRequestId = null;
 
   const title = document.getElementById("requestModalTitle");
   const submitButton = document.getElementById("requestSubmitButton");
 
-  if (title) title.innerText = "New Withdrawal Request";
-  if (submitButton) submitButton.innerText = "Submit Request";
+  if (title) title.innerText = "New Claim Request";
+  if (submitButton) submitButton.innerText = "Submit Claim";
 
-  const member = document.getElementById("requestMember");
-  const contact = document.getElementById("requestContact");
-  const total = document.getElementById("requestTotal");
-  const amount = document.getElementById("requestAmount");
-  const purpose = document.getElementById("requestPurpose");
-  const balance = document.getElementById("formBalance");
+  [
+    "requestMember",
+    "requestMemberId",
+    "requestContact",
+    "requestGender",
+    "requestSegmentation",
+    "requestBranch",
+    "requestHospital",
+    "requestDateAdmitted",
+    "requestDateDischarged",
+    "requestPurpose"
+  ].forEach(id => setInputValue(id, ""));
 
-  if (member) member.value = "";
-  if (contact) contact.value = "";
-  if (total) total.value = "";
-  if (amount) amount.value = "";
-  if (purpose) purpose.value = "";
-  if (balance) balance.textContent = "0.00";
+  ["actualDaysConfined", "computedDaysConfined"].forEach(id => setTextValue(id, "0"));
+  setTextValue("ratePerDay", "0.00");
+  setTextValue("totalClaimableAmount", "0.00");
+
+  const attachments = document.getElementById("requestAttachments");
+  if (attachments) attachments.value = "";
 }
 
 function populateRequestForm(request) {
@@ -297,32 +1701,32 @@ function populateRequestForm(request) {
 
   const title = document.getElementById("requestModalTitle");
   const submitButton = document.getElementById("requestSubmitButton");
-  const member = document.getElementById("requestMember");
-  const contact = document.getElementById("requestContact");
-  const total = document.getElementById("requestTotal");
-  const amount = document.getElementById("requestAmount");
-  const purpose = document.getElementById("requestPurpose");
-  const balance = document.getElementById("formBalance");
 
   editingRequestId = request[0];
 
-  if (title) title.innerText = "Edit Withdrawal Request";
+  if (title) title.innerText = "Edit Claim Request";
   if (submitButton) submitButton.innerText = "Save Changes";
-  if (member) member.value = request[1] || "";
-  if (contact) contact.value = request[11] || "";
-  if (total) total.value = request[2] || "";
-  if (amount) amount.value = request[3] || "";
-  if (purpose) purpose.value = request[5] || "";
 
-  const remainingBalance = (parseFloat(request[2]) || 0) - (parseFloat(request[3]) || 0);
-  if (balance) {
-    balance.textContent = Math.max(remainingBalance, 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-  }
+  setInputValue("requestMemberId", request[17] || "");
+  setInputValue("requestMember", request[17] ? `${request[1]} (${request[17]})` : request[1] || "");
+  setInputValue("requestContact", request[12] || "");
+  setInputValue("requestGender", request[2] || "");
+  setInputValue("requestSegmentation", request[18] || "");
+  setInputValue("requestBranch", getRequestBranchName(request));
+  setInputValue("requestHospital", request[20] || "");
+  setInputValue("requestDateAdmitted", request[21] || "");
+  setInputValue("requestDateDischarged", request[22] || "");
+  setInputValue("requestPurpose", request[24] || "");
+
+  setTextValue("actualDaysConfined", String(request[23] || 0));
+  setTextValue("computedDaysConfined", String(request[3] || 0));
+  setTextValue("ratePerDay", formatNumber(request[4]));
+  setTextValue("totalClaimableAmount", formatNumber(request[5]));
 }
 
 function openEditRequest(requestId) {
   const request = allRequests.find(x => Array.isArray(x) && x[0] === requestId);
-  if (!request || request[6] !== "Returned") return;
+  if (!request || request[7] !== "Returned") return;
 
   populateRequestForm(request);
 
@@ -336,10 +1740,11 @@ function openEditRequest(requestId) {
 async function loadRequests(tableId) {
   const res = await fetch(API, {
     method: "POST",
+    headers: APPS_SCRIPT_JSON_HEADERS,
     body: JSON.stringify({ action: "getRequests" })
   });
 
-  const data = await res.json();
+  const data = sortRequestDataNewestFirst(await parseApiJsonResponse(res));
 
   let html = "";
 
@@ -350,11 +1755,11 @@ async function loadRequests(tableId) {
       <tr>
         <td>${r[0]}</td>
         <td>${r[1]}</td>
-        <td>₱${r[2]}</td>
-        <td>₱${r[3]}</td>
-        <td>₱${r[4]}</td>
-        <td>${r[5]}</td>
+        <td>${formatDays(r[3])}</td>
+        <td>${formatMoney(r[4])}</td>
+        <td>${formatMoney(r[5])}</td>
         <td>${r[6]}</td>
+        <td>${getStatusLabel(r[7])}</td>
         <td>
           <button onclick="view('${r[0]}')">View</button>
         </td>
@@ -367,112 +1772,244 @@ async function loadRequests(tableId) {
 
 // ➕ SUBMIT REQUEST (TELLER)
 async function submitRequest() {
-  const total = parseFloat(document.getElementById("requestTotal").value);
-  const amount = parseFloat(document.getElementById("requestAmount").value);
-  const memberName = document.getElementById("requestMember").value.trim();
-  const contactNumber = document.getElementById("requestContact").value.trim();
-  const purpose = document.getElementById("requestPurpose").value.trim();
+  const member = getSelectedRequestMember();
+  const hospitalId = document.getElementById("requestHospital")?.value || "";
+  const hospital = allHospitals.find(item => String(item.id) === String(hospitalId));
+  const dateAdmitted = document.getElementById("requestDateAdmitted")?.value || "";
+  const dateDischarged = document.getElementById("requestDateDischarged")?.value || "";
+  const diagnosis = document.getElementById("requestPurpose")?.value.trim() || "";
+  const segmentation = document.getElementById("requestSegmentation")?.value || member?.segmentation || "";
+  const days = calculateHospitalDays(dateAdmitted, dateDischarged);
+  const dailyRate = getDailyRateForSegmentation(segmentation);
 
-  if (!memberName) {
-    alert("Member Name is required.");
+  if (!member) {
+    alert("Please select a member from the member search results.");
     return;
   }
 
-  if (!purpose) {
-    alert("Purpose is required.");
+  if (!hospital) {
+    alert("Please select the hospital where the member was confined.");
     return;
   }
 
-  if (Number.isNaN(total) || Number.isNaN(amount)) {
-    alert("Please enter valid investment and withdrawal amounts.");
+  if (!dateAdmitted || !dateDischarged || days.actualDays <= 0) {
+    alert("Please enter valid admitted and discharged dates.");
     return;
   }
 
-  if ((total - amount) < 3000) {
-    alert("Balance must not go below ₱3,000");
+  if (days.actualDays < MIN_ELIGIBLE_CONFINEMENT_DAYS) {
+    alert(`Hospital confinement must be at least ${MIN_ELIGIBLE_CONFINEMENT_DAYS} days to be eligible for a claim.`);
+    return;
+  }
+
+  if (!dailyRate) {
+    alert(`No daily rate is configured for the ${segmentation || "selected"} segmentation.`);
     return;
   }
 
   const action = editingRequestId ? "editRequest" : "createRequest";
+  const attachments = await readRequestAttachments();
 
-  await fetch(API, {
+  const res = await fetch(API, {
     method: "POST",
+    headers: APPS_SCRIPT_JSON_HEADERS,
     body: JSON.stringify({
       action: action,
       request_id: editingRequestId,
-      memberName: memberName,
-      totalInvestment: total,
-      amount: amount,
-      purpose: purpose,
-      contactNumber: contactNumber,
+      memberID: member.memberID,
+      memberName: member.fullName,
+      gender: member.gender || "",
+      segmentation: segmentation,
+      branch: member.branch,
+      branchName: member.branchName || getBranchName(member.branch),
+      hospitalID: hospital.id,
+      hospitalName: hospital.name,
+      dateAdmitted: dateAdmitted,
+      dateDischarged: dateDischarged,
+      actualDaysConfined: days.actualDays,
+      daysConfined: days.payableDays,
+      dailyRate: dailyRate,
+      claimableAmount: days.payableDays * dailyRate,
+      diagnosis: diagnosis,
+      contactNumber: member.contactNumber || document.getElementById("requestContact")?.value.trim() || "",
       tellerName: localStorage.getItem("fullname"),
       tellerEmail: localStorage.getItem("user"),
-      tellerBranchId: localStorage.getItem("branchid"),
-      date: new Date().toLocaleDateString()
+      tellerBranchId: member.branch || localStorage.getItem("branchid"),
+      attachments: attachments
     })
   });
+  const data = await parseApiJsonResponse(res);
 
-  alert(editingRequestId ? "Request updated and resubmitted for review." : "Submitted!");
+  if (!data.success) {
+    alert(data.message || "Failed to save request.");
+    return;
+  }
+
+  alert(editingRequestId ? "Claim updated and resubmitted for verification." : "Claim submitted for verification.");
   closeRequestModal();
   location.reload();
 }
 
 // 🔄 UPDATE STATUS
+function getWorkflowActionCopy(role, status) {
+  const key = `${normalizeRole(role)}|${status}`;
+  const copies = {
+    "branch_manager|Returned": {
+      confirm: "Return this claim to CRS?",
+      success: "Claim returned to CRS successfully."
+    },
+    "branch_manager|Under Verification": {
+      confirm: "Forward this claim to the Membership Specialist?",
+      success: "Claim forwarded to the Membership Specialist successfully."
+    },
+    "membership_specialist|Pending": {
+      confirm: "Return this claim to the Branch Manager?",
+      success: "Claim returned to the Branch Manager successfully."
+    },
+    "membership_specialist|Under Review": {
+      confirm: "Forward this claim to Finance and Accounting?",
+      success: "Claim forwarded to Finance and Accounting successfully."
+    },
+    "finance_head|Under Verification": {
+      confirm: "Return this claim to the Membership Specialist?",
+      success: "Claim returned to the Membership Specialist successfully."
+    },
+    "finance_head|Forwarded": {
+      confirm: "Forward this claim to the Savings and Credit Head?",
+      success: "Claim forwarded to the Savings and Credit Head successfully."
+    },
+    "savings_credit_head|Under Review": {
+      confirm: "Return this claim to Finance and Accounting?",
+      success: "Claim returned to Finance and Accounting successfully."
+    },
+    "savings_credit_head|Approved": {
+      confirm: "Approve this claim?",
+      success: "Claim approved successfully."
+    },
+    "savings_credit_head|Rejected": {
+      confirm: "Reject this claim?",
+      success: "Claim rejected successfully."
+    }
+  };
+
+  return copies[key] || {
+    confirm: `Update this claim to ${getStatusLabel(status)}?`,
+    success: `Claim status updated to ${getStatusLabel(status)} successfully.`
+  };
+}
+
 async function updateStatus(id, status) {
-  const role = localStorage.getItem("role");
+  const role = getCurrentRole();
   const fullname = localStorage.getItem("fullname");
   const email = localStorage.getItem("user");
+  const actionCopy = getWorkflowActionCopy(role, status);
   let notes = "";
 
+  if (!window.confirm(actionCopy.confirm)) {
+    return;
+  }
+
   if (role === "branch_manager" && status === "Returned") {
-    notes = window.prompt("Enter notes for the teller before returning this request:", "") || "";
+    notes = window.prompt("Enter notes for the Customer Relations Specialist before returning this claim:", "") || "";
     notes = notes.trim();
 
     if (!notes) {
-      alert("Notes are required before returning a request to the teller.");
+      alert("Notes are required before returning a claim.");
       return;
     }
   }
 
-  if (role === "finance_manager" && status === "Under Review") {
-    notes = window.prompt("Enter notes for the branch manager before returning this request:", "") || "";
+  if (role === "membership_specialist" && status === "Pending") {
+    notes = window.prompt("Enter notes for the Branch Manager before returning this claim:", "") || "";
     notes = notes.trim();
 
     if (!notes) {
-      alert("Notes are required before returning a request to the branch manager.");
+      alert("Notes are required before returning a claim.");
       return;
     }
   }
-  
+
+  if (role === "finance_head" && status === "Under Verification") {
+    notes = window.prompt("Enter notes for the Membership Specialist before returning this claim:", "") || "";
+    notes = notes.trim();
+
+    if (!notes) {
+      alert("Notes are required before returning a claim.");
+      return;
+    }
+  }
+
+  if (role === "savings_credit_head" && status === "Under Review") {
+    notes = window.prompt("Enter notes for the Finance Manager before returning this claim:", "") || "";
+    notes = notes.trim();
+
+    if (!notes) {
+      alert("Notes are required before returning a claim.");
+      return;
+    }
+  }
+
+  const currentRequest = Array.isArray(allRequests)
+    ? allRequests.find(row => Array.isArray(row) && String(row[0]) === String(id))
+    : null;
+
   let updateData = {
     action: "updateStatus",
     request_id: id,
     status: status,
     role: role,
-    dateStamp: new Date().toLocaleString(),
+    dateStamp: currentRequest ? currentRequest[11] : "",
     notes: notes
   };
-  
+
   if (role === "branch_manager") {
     updateData.branchManagerName = fullname;
     updateData.branchManagerEmail = email;
-  } else if (role === "finance_manager") {
+  } else if (role === "membership_specialist" || role === "finance_head" || role === "savings_credit_head") {
     updateData.financeManagerName = fullname;
     updateData.financeManagerEmail = email;
   }
-  
-  await fetch(API, {
-    method: "POST",
-    body: JSON.stringify(updateData)
-  });
 
-  alert("Updated!");
-  location.reload();
+  console.log("Sending updateStatus request:", updateData);
+
+  try {
+    let data;
+
+    try {
+      data = await callAppsScriptJsonp(updateData, 45000);
+    } catch (jsonpErr) {
+      console.warn("Unable to read Apps Script update response; retrying write with no-cors POST.", jsonpErr);
+      await submitAppsScriptWrite(updateData, 45000);
+      await wait(1200);
+
+      const confirmed = await verifyRequestStatus(id, status);
+      if (!confirmed) {
+        alert("The update was sent, but the new status could not be confirmed. Please refresh the page and check the claim status.");
+        return;
+      }
+
+      data = { success: true };
+    }
+
+    console.log("Update response data:", data);
+
+    if (!data.success) {
+      alert(data.message || "Failed to update request.");
+      return;
+    }
+
+    alert(actionCopy.success);
+    location.reload();
+  } catch (err) {
+    console.error("Failed to update request:", err);
+    alert("Failed to update request. Please check your connection and try again.");
+  }
 }
 
 
 function getStatusClass(status) {
   if (status === "Pending") return "badge pending";
+  if (status === "Under Verification") return "badge review";
   if (status === "Under Review") return "badge review";
   if (status === "Approved") return "badge approved";
   if (status === "Rejected") return "badge rejected";
@@ -483,6 +2020,7 @@ function getStatusClass(status) {
 
 // 📦 STORE DATA FOR MODAL
 let allRequests = [];
+let workflowRequestsPromise = null;
 
 function normalizeValue(value) {
   return String(value ?? "").trim().toLowerCase();
@@ -497,18 +2035,235 @@ function escapeHtml(value) {
     .replace(/'/g, "&#39;");
 }
 
+function getRequestSortTime(request) {
+  if (!Array.isArray(request)) return 0;
+
+  const dateCandidates = [request[11], request[21], request[22]];
+  for (const value of dateCandidates) {
+    if (!value) continue;
+    const parsed = new Date(value).getTime();
+    if (!Number.isNaN(parsed)) return parsed;
+  }
+
+  const idMatch = String(request[0] || "").match(/(\d{10,})/);
+  if (idMatch) {
+    const numericId = Number(idMatch[1]);
+    return numericId > 1000000000000 ? numericId : numericId * 1000;
+  }
+
+  return 0;
+}
+
+function sortRequestDataNewestFirst(data) {
+  if (!Array.isArray(data)) return data;
+  if (!data.length) return [];
+  const hasHeader = Array.isArray(data[0]) && normalizeValue(data[0][0]) === "claimid";
+  const header = hasHeader ? data[0] : null;
+  const rows = data
+    .slice(hasHeader ? 1 : 0)
+    .filter(Array.isArray)
+    .sort((a, b) => getRequestSortTime(b) - getRequestSortTime(a));
+  return hasHeader ? [header, ...rows] : rows;
+}
+
+function getAttachmentName(attachment, index) {
+  return attachment.file_name || attachment.name || attachment.filename || `Attachment ${index + 1}`;
+}
+
+function getAttachmentMimeType(attachment, dataUrl = "") {
+  const explicitType = attachment.file_type || attachment.type || attachment.mime_type || "";
+  if (explicitType) return explicitType;
+
+  const dataUrlMatch = String(dataUrl).match(/^data:([^;,]+)/i);
+  if (dataUrlMatch) return dataUrlMatch[1];
+
+  const name = String(attachment.file_name || attachment.name || attachment.filename || "").toLowerCase();
+  if (name.endsWith(".pdf")) return "application/pdf";
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
+  if (name.endsWith(".gif")) return "image/gif";
+  if (name.endsWith(".webp")) return "image/webp";
+  return "application/octet-stream";
+}
+
+function getAttachmentDataUrl(attachment) {
+  const rawData = attachment.file_data || attachment.dataUrl || attachment.data_url || attachment.url || "";
+  if (!rawData) return "";
+
+  const value = String(rawData);
+  if (/^(data:|https?:|blob:)/i.test(value)) return value;
+
+  const mimeType = getAttachmentMimeType(attachment);
+  return `data:${mimeType};base64,${value}`;
+}
+
+function renderAttachmentPreview(attachment, index) {
+  const name = getAttachmentName(attachment, index);
+  const dataUrl = getAttachmentDataUrl(attachment);
+  const escapedName = escapeHtml(name);
+
+  if (!dataUrl) {
+    return `
+      <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; border:1px solid #e5e7eb; border-radius:4px; margin-bottom:8px;">
+        <div>
+          <span style="display:block; font-weight:600;">${escapedName}</span>
+          <span style="display:block; margin-top:4px; color:#777;">No attachment data available.</span>
+        </div>
+        <button type="button" disabled style="padding:6px 10px; border:1px solid #e5e7eb; border-radius:4px; background:#f8fafc; color:#94a3b8; cursor:not-allowed;">Print</button>
+      </div>
+    `;
+  }
+
+  return `
+    <div style="display:flex; justify-content:space-between; align-items:center; gap:12px; padding:10px 12px; border:1px solid #e5e7eb; border-radius:4px; margin-bottom:8px;">
+      <a href="#" onclick="openAttachmentPreview(${index}); return false;" style="font-weight:600; color:#1d4ed8; text-decoration:none;">${escapedName}</a>
+      <button type="button" onclick="printAttachment(${index})" style="padding:6px 10px; border:1px solid #cbd5e1; border-radius:4px; background:#fff; color:#1d4ed8; cursor:pointer;">Print</button>
+    </div>
+  `;
+}
+
+function dataUrlToBlobUrl(dataUrl, fallbackType = "application/octet-stream") {
+  const match = String(dataUrl).match(/^data:([^;,]+)?(;base64)?,(.*)$/);
+  if (!match) return dataUrl;
+
+  const mimeType = match[1] || fallbackType;
+  const isBase64 = Boolean(match[2]);
+  const payload = match[3] || "";
+  const byteString = isBase64 ? atob(payload.replace(/\s/g, "")) : decodeURIComponent(payload);
+  const bytes = new Uint8Array(byteString.length);
+
+  for (let i = 0; i < byteString.length; i++) {
+    bytes[i] = byteString.charCodeAt(i);
+  }
+
+  return URL.createObjectURL(new Blob([bytes], { type: mimeType }));
+}
+
+function openAttachmentPreview(index) {
+  const attachments = Array.isArray(window.currentModalAttachments) ? window.currentModalAttachments : [];
+  const attachment = attachments[index];
+  if (!attachment) return;
+
+  const dataUrl = getAttachmentDataUrl(attachment);
+  if (!dataUrl) return;
+
+  const previewWindow = window.open("about:blank", "_blank");
+  if (!previewWindow) return;
+
+  if (/^https?:|^blob:/i.test(dataUrl)) {
+    previewWindow.location.href = dataUrl;
+    return;
+  }
+
+  const blobUrl = dataUrlToBlobUrl(dataUrl, getAttachmentMimeType(attachment, dataUrl));
+  previewWindow.location.href = blobUrl;
+  setTimeout(() => URL.revokeObjectURL(blobUrl), 60000);
+}
+
+function printAttachment(index) {
+  const attachments = Array.isArray(window.currentModalAttachments) ? window.currentModalAttachments : [];
+  const attachment = attachments[index];
+  if (!attachment) return;
+
+  const dataUrl = getAttachmentDataUrl(attachment);
+  if (!dataUrl) {
+    alert("This attachment cannot be printed because no file data is available.");
+    return;
+  }
+
+  const name = getAttachmentName(attachment, index);
+  const mimeType = getAttachmentMimeType(attachment, dataUrl);
+  const isExternalUrl = /^https?:/i.test(dataUrl);
+
+  if (isExternalUrl) {
+    const externalWindow = window.open(dataUrl, "_blank");
+    if (!externalWindow) return;
+    setTimeout(() => {
+      try {
+        externalWindow.focus();
+        externalWindow.print();
+      } catch (err) {
+        console.warn("Unable to trigger print for external attachment:", err);
+      }
+    }, 1200);
+    return;
+  }
+
+  const printableUrl = /^blob:/i.test(dataUrl)
+    ? dataUrl
+    : dataUrlToBlobUrl(dataUrl, mimeType);
+  const printWindow = window.open("about:blank", "_blank");
+  if (!printWindow) return;
+
+  const escapedUrl = escapeHtml(printableUrl);
+  const escapedName = escapeHtml(name);
+  const isPdf = mimeType === "application/pdf" || String(name).toLowerCase().endsWith(".pdf");
+  const content = mimeType.startsWith("image/")
+    ? `<img src="${escapedUrl}" alt="${escapedName}" style="max-width:100%; height:auto; display:block; margin:0 auto;" onload="setTimeout(function(){window.focus();window.print();}, 300)">`
+    : `<iframe src="${escapedUrl}" title="${escapedName}" style="width:100%; height:100vh; border:0;" onload="setTimeout(function(){window.focus();window.print();}, ${isPdf ? 500 : 300})"></iframe>`;
+
+  printWindow.document.write(`
+    <html>
+      <head>
+        <title>${escapedName}</title>
+        <style>
+          @page{margin:0.35in;}
+          body{margin:0; font-family:Arial, sans-serif;}
+        </style>
+      </head>
+      <body>${content}</body>
+    </html>
+  `);
+  printWindow.document.close();
+
+  if (!/^blob:/i.test(dataUrl)) {
+    setTimeout(() => URL.revokeObjectURL(printableUrl), 60000);
+  }
+}
+
 function requestBelongsToBranch(request, branchId) {
   if (!Array.isArray(request)) return false;
-  return normalizeValue(request[12]) === normalizeValue(branchId);
+  return normalizeValue(request[13]) === normalizeValue(branchId);
+}
+
+function getWorkflowQueueStatus(role = getCurrentRole()) {
+  const normalizedRole = normalizeRole(role);
+  if (normalizedRole === "branch_manager") return "Pending";
+  if (normalizedRole === "membership_specialist") return "Under Verification";
+  if (normalizedRole === "finance_head") return "Under Review";
+  if (normalizedRole === "savings_credit_head") return "Forwarded";
+  return "";
+}
+
+function userCanViewBranchRequest(request, role = getCurrentRole(), branchId = localStorage.getItem("branchid")) {
+  const normalizedRole = normalizeRole(role);
+  if (normalizedRole === "branch_manager") return requestBelongsToBranch(request, branchId);
+  if (normalizedRole === "membership_specialist") return !normalizeValue(branchId) || requestBelongsToBranch(request, branchId);
+  return true;
+}
+
+function getBranchQueueCopy(role = getCurrentRole()) {
+  const normalizedRole = normalizeRole(role);
+  if (normalizedRole === "membership_specialist") {
+    return {
+      tableCount: "awaiting membership verification",
+      empty: "No claims awaiting membership verification."
+    };
+  }
+  return {
+    tableCount: "awaiting branch manager review",
+    empty: "No claims awaiting branch manager review."
+  };
 }
 
 async function loadStyledTable(tableId, role) {
   const res = await fetch(API, {
     method: "POST",
+    headers: APPS_SCRIPT_JSON_HEADERS,
     body: JSON.stringify({ action: "getRequests" })
   });
 
-  const data = await res.json();
+  const data = sortRequestDataNewestFirst(await parseApiJsonResponse(res));
   allRequests = data;
 
   let html = "";
@@ -531,10 +2286,10 @@ async function loadStyledTable(tableId, role) {
     for (let i = 1; i < data.length; i++) {
       const r = data[i];
       if (!Array.isArray(r)) continue;
-      
+
       // Check if request was created by this teller
-      // r[7] should contain tellerName (from localStorage.getItem("fullname"))
-      if (r[7] && (r[7] === tellerFullname || r[7] === storedUser)) {
+      // r[8] should contain EncodedBy (tellerName)
+      if (r[8] && (r[8] === tellerFullname || r[8] === storedUser)) {
         filteredData.push(r);
       }
     }
@@ -543,17 +2298,17 @@ async function loadStyledTable(tableId, role) {
 
     for (let i = 0; i < filteredData.length; i++) {
       const r = filteredData[i];
-      const dateStr = r[10] ? new Date(r[10]).toLocaleString() : "N/A";
+      const dateStr = r[11] ? new Date(r[11]).toLocaleString() : "N/A";
 
       html += `
       <tr>
         <td>${r[0]}</td>
         <td>${r[1]}</td>
-        <td>₱${r[2]}</td>
-        <td>₱${r[3]}</td>
-        <td>₱${r[4]}</td>
-        <td>${r[5]}</td>
-        <td><span class="${getStatusClass(r[6])}">${r[6]}</span></td>
+        <td>${formatDays(r[3])}</td>
+        <td>${formatMoney(r[4])}</td>
+        <td>${formatMoney(r[5])}</td>
+        <td>${r[6]}</td>
+        <td><span class="${getStatusClass(r[7])}">${getStatusLabel(r[7])}</span></td>
         <td>${dateStr}</td>
         <td>
           <button class="btn blue" onclick="openModal('${r[0]}')">View</button>
@@ -563,30 +2318,30 @@ async function loadStyledTable(tableId, role) {
     }
   } else {
     const branchId = tableId === "branchTable" ? localStorage.getItem("branchid") : null;
-    
+
     for (let i = 1; i < data.length; i++) {
       const r = data[i];
-      const dateStr = r[10] ? new Date(r[10]).toLocaleString() : "N/A";
+      const dateStr = r[11] ? new Date(r[11]).toLocaleString() : "N/A";
 
       let extraColumn = "";
       if (tableId === "branchTable") {
         // Branch managers only see requests from their branch
         if (!requestBelongsToBranch(r, branchId)) continue;
-        extraColumn = `<td>${r[7]}</td>`; // SUBMITTED BY
+        extraColumn = `<td>${r[8]}</td>`; // ENCODED BY
       } else if (tableId === "financeTable") {
-        extraColumn = `<td>${r[8]}</td>`; // BRANCH MANAGER
+        extraColumn = `<td>${r[9]}</td>`; // VERIFIED BY
       }
 
       html += `
       <tr>
         <td>${r[0]}</td>
         <td>${r[1]}</td>
-        <td>₱${r[2]}</td>
-        <td>₱${r[3]}</td>
-        <td>₱${r[4]}</td>
-        <td>${r[5]}</td>
+        <td>${formatDays(r[3])}</td>
+        <td>${formatMoney(r[4])}</td>
+        <td>${formatMoney(r[5])}</td>
+        <td>${r[6]}</td>
         ${extraColumn}
-        <td><span class="${getStatusClass(r[6])}">${r[6]}</span></td>
+        <td><span class="${getStatusClass(r[7])}">${getStatusLabel(r[7])}</span></td>
         <td>${dateStr}</td>
         <td>
           <button class="btn blue" onclick="openModal('${r[0]}')">View</button>
@@ -607,18 +2362,18 @@ function openModal(id) {
   // Store current request ID for approval/rejection
   window.currentRequestId = id;
 
-  const dateStr = r[10]
-    ? new Date(r[10]).toLocaleDateString()
+  const dateStr = r[11]
+    ? new Date(r[11]).toLocaleDateString()
     : "N/A";
-  const balance = parseFloat(r[4]) || 0;
-  const total = parseFloat(r[2]) || 0;
-  const withdrawn = parseFloat(r[3]) || 0;
-  const tellerName = r[7] || localStorage.getItem("fullname") || "Unknown";
-  const branchManagerNotes = r[13] || "";
+  const claimableAmount = parseFloat(r[5]) || 0;
+  const daysComputed = parseFloat(r[3]) || 0;
+  const dailyRate = parseFloat(r[4]) || 0;
+  const tellerName = r[8] || localStorage.getItem("fullname") || "Unknown";
+  const branchManagerNotes = r[14] || "";
 
   document.getElementById("modalContent").innerHTML = `
     <div style="margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px;">
-      <h3 style="margin: 0 0 5px 0;">Request Details — ${r[0]}</h3>
+      <h3 style="margin: 0 0 5px 0;">Claim Details — ${r[0]}</h3>
       <p style="margin: 0; font-size: 13px; color: #666;">Member: ${r[1]} · Submitted ${dateStr}</p>
     </div>
 
@@ -633,38 +2388,38 @@ function openModal(id) {
       </div>
       <div>
         <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Contact Number</label>
-        <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${r[11] || 'N/A'}</p>
+        <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${r[12] || 'N/A'}</p>
       </div>
     </div>
 
     <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
       <div>
-        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Total Investment</label>
-        <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">₱${total.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Days Computed</label>
+        <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${daysComputed}</p>
       </div>
       <div>
-        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Amount Withdrawn</label>
-        <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">₱${withdrawn.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Daily Rate</label>
+        <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">₱${dailyRate.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
       </div>
     </div>
 
     <div style="background: #e8f8f5; border-left: 4px solid #16a085; padding: 15px; border-radius: 4px; margin-bottom: 20px;">
-      <label style="font-size: 11px; color: #16a085; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Remaining Balance (Total Investment − Amount Withdrawn)</label>
-      <p style="margin: 0; font-size: 18px; font-weight: 700; color: #16a085;">₱${balance.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
+      <label style="font-size: 11px; color: #16a085; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Claimable Amount</label>
+      <p style="margin: 0; font-size: 18px; font-weight: 700; color: #16a085;">₱${claimableAmount.toLocaleString('en-US', {minimumFractionDigits: 2, maximumFractionDigits: 2})}</p>
     </div>
 
     <div style="margin-bottom: 20px;">
-      <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Purpose of Withdrawal</label>
-      <p style="margin: 0; font-size: 14px; color: #333;">${r[5]}</p>
+      <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Diagnosis / Remarks</label>
+      <p style="margin: 0; font-size: 14px; color: #333;">${r[24] || 'N/A'}</p>
     </div>
 
     <div style="display: flex; align-items: center; gap: 10px;">
       <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600;">Current Status:</label>
-      <span class="${getStatusClass(r[6])}" style="padding: 4px 10px; border-radius: 20px; font-size: 12px;">${r[6]}</span>
+      <span class="${getStatusClass(r[7])}" style="padding: 4px 10px; border-radius: 20px; font-size: 12px;">${getStatusLabel(r[7])}</span>
     </div>
-    ${((r[6] === "Returned" || r[6] === "Under Review") && branchManagerNotes) ? `
+    ${((r[7] === "Returned" || r[7] === "Under Review") && branchManagerNotes) ? `
       <div style="margin-top: 20px; padding: 16px; background: #fff4f4; border-left: 4px solid #dc2626; border-radius: 6px;">
-        <label style="font-size: 11px; color: #b91c1c; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">${r[6] === "Returned" ? "Branch Manager Notes" : "Finance Manager Notes"}</label>
+        <label style="font-size: 11px; color: #b91c1c; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">${r[7] === "Returned" ? "Branch Manager Notes" : "Finance Manager Notes"}</label>
         <p style="margin: 0; font-size: 14px; color: #7f1d1d;">${escapeHtml(branchManagerNotes)}</p>
       </div>
     ` : ""}
@@ -683,8 +2438,9 @@ function openModal(id) {
     // Check if buttons already exist, remove them
     const existingBtns = modalFooter.querySelectorAll('.role-action-btn');
     existingBtns.forEach(btn => btn.remove());
+    const role = getCurrentRole();
 
-    if (localStorage.getItem("role") === "branch_manager" && (r[6] === "Pending" || r[6] === "Under Review")) {
+    if (role === "branch_manager" && (r[7] === "Pending" || r[7] === "Under Review")) {
       const returnBtn = document.createElement("button");
       returnBtn.className = "btn red role-action-btn";
       returnBtn.style.cssText = "margin-left: auto; margin-right: 10px;";
@@ -697,7 +2453,7 @@ function openModal(id) {
       forwardBtn.textContent = "Forward to Approver";
       forwardBtn.onclick = () => updateStatus(r[0], "Forwarded");
       modalFooter.appendChild(forwardBtn);
-    } else if (localStorage.getItem("role") === "finance_manager" && r[6] === "Forwarded") {
+    } else if (role === "finance_head" && r[7] === "Forwarded") {
       const returnBtn = document.createElement("button");
       returnBtn.className = "btn red role-action-btn";
       returnBtn.style.cssText = "margin-left: auto; margin-right: 10px;";
@@ -716,7 +2472,7 @@ function openModal(id) {
       }
     }
 
-    if (localStorage.getItem("role") === "teller" && r[6] === "Returned") {
+    if (role === "crs" && r[7] === "Returned") {
       const editBtn = document.createElement("button");
       editBtn.className = "btn blue role-action-btn";
       editBtn.style.cssText = "margin-left: auto; margin-right: 10px;";
@@ -728,7 +2484,7 @@ function openModal(id) {
       modalFooter.appendChild(editBtn);
     }
 
-    if (localStorage.getItem("role") === "teller" && r[6] === "Approved") {
+    if (role === "crs" && r[7] === "Approved") {
       const printBtn = document.createElement("button");
       printBtn.className = "btn blue role-action-btn";
       printBtn.style.cssText = "margin-left: auto; margin-right: 10px;";
@@ -757,7 +2513,7 @@ function closeModal() {
 
 async function printRequest() {
   const r = allRequests.find(x => x[0] === window.currentRequestId);
-  if (!r || r[6] !== "Approved") {
+  if (!r || r[7] !== "Approved") {
     alert("Only approved requests can be printed.");
     return;
   }
@@ -770,7 +2526,6 @@ async function printRequest() {
     });
     const settingsData = await settingsRes.json();
     settings = settingsData.settings || {};
-    // After: settings = settingsData.settings || {};
     console.log('Print settings loaded:', settings);
   } catch (err) {
     console.warn("Unable to load print settings:", err);
@@ -778,22 +2533,22 @@ async function printRequest() {
 
   const headerImageSrc = settings.reportHeaderImage || settings.headerImage || "";
 
-  const tellerName = r[7] || settings.tellerName || localStorage.getItem("fullname") || "Teller";
-  const branchManagerName = r[8] || settings.branchManagerName || "Branch Manager";
-  const financeManagerName = r[9] || settings.financeManagerName || "Savings and Credit Head";
-  const dateStr = r[10]
-    ? new Date(r[10]).toLocaleDateString()
+  const tellerName = r[8] || settings.tellerName || localStorage.getItem("fullname") || "Teller";
+  const branchManagerName = r[9] || settings.branchManagerName || "Branch Manager";
+  const financeManagerName = r[10] || settings.financeManagerName || "Savings and Credit Head";
+  const dateStr = r[11]
+    ? new Date(r[11]).toLocaleDateString()
     : "N/A";
 
   const tellerSignature = settings.tellerSignatureData || "";
   const branchSignature = settings.branchManagerSignatureData || "";
   const financeSignature = settings.financeManagerSignatureData || "";
   const memberName = r[1] || "N/A";
-  const contactNumber = r[11] || "N/A";
-  const reason = r[5] || "N/A";
-  const totalAmount = `&#8369;${parseFloat(r[2] || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  const withdrawnAmount = `&#8369;${parseFloat(r[3] || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
-  const balanceAmount = `&#8369;${parseFloat(r[4] || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const contactNumber = r[12] || "N/A";
+  const reason = r[24] || "N/A";
+  const totalAmount = `&#8369;${parseFloat(r[3] || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const dailyRate = `&#8369;${parseFloat(r[4] || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  const claimableAmount = `&#8369;${parseFloat(r[5] || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 
   console.log('Settings loaded for print:', settings);
   console.log('Header image src:', headerImageSrc, 'length:', headerImageSrc.length);
@@ -844,14 +2599,14 @@ async function printRequest() {
       }
   </style>`);
   printWindow.document.write(`</head><body><div class="page">`);
-  printWindow.document.write(`<div class="header">${headerImageSrc ? `<img src="${headerImageSrc}" alt="Report Header" />` : ''}<h1>Investment Withdrawal Form</h1></div>`);
+  printWindow.document.write(`<div class="header">${headerImageSrc ? `<img src="${headerImageSrc}" alt="Report Header" />` : ''}<h1>Hospital Claim Form</h1></div>`);
   printWindow.document.write(`<div class="top-row"><div></div><div class="date-group"><div class="label inline-label">Date</div><div class="field-box date-box">${dateStr}</div></div></div>`);
-  printWindow.document.write(`<div class="field-grid"><div class="field-group"><div class="label">Subscriber's Name</div><div class="field-box name-box">${memberName}</div></div><div class="field-group"><div class="label">Contact Number</div><div class="field-box contact-box">${contactNumber}</div></div></div>`);
-  printWindow.document.write(`<div class="summary"><div class="summary-item"><div class="label">Total Investment</div><div class="amount">${totalAmount}</div></div><div class="summary-item"><div class="label">Withdrawal</div><div class="amount">${withdrawnAmount}</div></div><div class="summary-item"><div class="label">Remaining Balance</div><div class="amount">${balanceAmount}</div></div></div>`);
-  printWindow.document.write(`<div class="reason-label">This is to request for withdrawal of my CATV/Internet investment for the reason:</div><div class="reason-box">${reason}</div>`);
-  printWindow.document.write(`<p class="footer-note">I understand that an amount of Php 3,000 should be retained as my maintaining investment balance.</p>`);
-  printWindow.document.write(`<div class="subscriber-signature"><div class="signature-box"><div style="height:62px;"></div><div class="signatory-name">${memberName}</div><div class="signature-caption">Subscriber's Name & Signature</div></div></div>`);
-  printWindow.document.write(`<div class="approval-section"><div class="two-signatures"><div class="signature-box"><div class="signature-label">Prepared by</div>${tellerSignature ? `<img class="signature-image" src="${tellerSignature}" alt="Prepared by signature" />` : '<div class="signature-line"></div>'}<div class="signatory-name">${tellerName}</div><div class="signatory-role">Teller</div></div><div class="signature-box"><div class="signature-label">Noted by</div>${branchSignature ? `<img class="signature-image" src="${branchSignature}" alt="Noted by signature" />` : '<div class="signature-line"></div>'}<div class="signatory-name">${branchManagerName}</div><div class="signatory-role">Branch Manager</div></div></div><div class="approved-signature"><div class="signature-label">Approved by</div>${financeSignature ? `<img class="signature-image" src="${financeSignature}" alt="Approved by signature" />` : '<div class="signature-line"></div>'}<div class="signatory-name">${financeManagerName}</div><div class="signatory-role">Savings and Credit Head</div></div></div>`);
+  printWindow.document.write(`<div class="field-grid"><div class="field-group"><div class="label">Patient Name</div><div class="field-box name-box">${memberName}</div></div><div class="field-group"><div class="label">Contact Number</div><div class="field-box contact-box">${contactNumber}</div></div></div>`);
+  printWindow.document.write(`<div class="summary"><div class="summary-item"><div class="label">Days Computed</div><div class="amount">${totalAmount}</div></div><div class="summary-item"><div class="label">Daily Rate</div><div class="amount">${dailyRate}</div></div><div class="summary-item"><div class="label">Claimable Amount</div><div class="amount">${claimableAmount}</div></div></div>`);
+  printWindow.document.write(`<div class="reason-label">Diagnosis/Remarks:</div><div class="reason-box">${reason}</div>`);
+  printWindow.document.write(`<p class="footer-note">This is a certified hospital claim form for medical confinement benefits.</p>`);
+  printWindow.document.write(`<div class="subscriber-signature"><div class="signature-box"><div style="height:62px;"></div><div class="signatory-name">${memberName}</div><div class="signature-caption">Patient's Name & Signature</div></div></div>`);
+  printWindow.document.write(`<div class="approval-section"><div class="two-signatures"><div class="signature-box"><div class="signature-label">Encoded by</div>${tellerSignature ? `<img class="signature-image" src="${tellerSignature}" alt="Encoded by signature" />` : '<div class="signature-line"></div>'}<div class="signatory-name">${tellerName}</div><div class="signatory-role">Teller</div></div><div class="signature-box"><div class="signature-label">Verified by</div>${branchSignature ? `<img class="signature-image" src="${branchSignature}" alt="Verified by signature" />` : '<div class="signature-line"></div>'}<div class="signatory-name">${branchManagerName}</div><div class="signatory-role">Membership Specialist</div></div></div><div class="approved-signature"><div class="signature-label">Approved by</div>${financeSignature ? `<img class="signature-image" src="${financeSignature}" alt="Approved by signature" />` : '<div class="signature-line"></div>'}<div class="signatory-name">${financeManagerName}</div><div class="signatory-role">Finance Head</div></div></div>`);
   printWindow.document.write(`</div></body></html>`);
   printWindow.document.close();
   setTimeout(() => {
@@ -864,10 +2619,11 @@ async function printRequest() {
 async function loadDashboardCounts() {
   const res = await fetch(API, {
     method: "POST",
+    headers: APPS_SCRIPT_JSON_HEADERS,
     body: JSON.stringify({ action: "getDashboardCounts" })
   });
 
-  const data = await res.json();
+  const data = await parseApiJsonResponse(res);
 
   document.getElementById("countAwaiting").innerText = data.awaiting;
   document.getElementById("countApproved").innerText = data.approved;
@@ -878,10 +2634,11 @@ async function loadDashboardCounts() {
 async function loadTellerCounts() {
   const res = await fetch(API, {
     method: "POST",
+    headers: APPS_SCRIPT_JSON_HEADERS,
     body: JSON.stringify({ action: "getRequests" })
   });
 
-  const data = await res.json();
+  const data = await parseApiJsonResponse(res);
   const tellerEmail = localStorage.getItem("user");
   const tellerFullname = localStorage.getItem("fullname");
 
@@ -892,12 +2649,12 @@ async function loadTellerCounts() {
 
   for (let i = 1; i < data.length; i++) {
     // Filter by current teller's email or fullname
-    if (data[i][7] === tellerEmail || data[i][7] === tellerFullname) {
+    if (data[i][8] === tellerEmail || data[i][8] === tellerFullname) {
       total++;
 
-      if (data[i][6] === "Pending") pending++;
-      if (data[i][6] === "Under Review") review++;
-      if (data[i][6] === "Approved") approved++;
+      if (data[i][7] === "Pending") pending++;
+      if (data[i][7] === "Under Review") review++;
+      if (data[i][7] === "Approved") approved++;
     }
   }
 
@@ -910,32 +2667,43 @@ async function loadTellerCounts() {
 async function loadBranchTable() {
   const res = await fetch(API, {
     method: "POST",
+    headers: APPS_SCRIPT_JSON_HEADERS,
     body: JSON.stringify({ action: "getRequests" })
   });
 
-  const data = await res.json();
+  const data = sortRequestDataNewestFirst(await parseApiJsonResponse(res));
   allRequests = data;
 
   const branchId = localStorage.getItem("branchid");
+  const role = getCurrentRole();
   let html = "";
 
   for (let i = 1; i < data.length; i++) {
     const r = data[i];
+    let shouldShow = false;
 
-    // SHOW ONLY RELEVANT RECORDS FROM SAME BRANCH
-    if ((r[6] === "Pending" || r[6] === "Under Review") && requestBelongsToBranch(r, branchId)) {
-      const dateStr = r[10] ? new Date(r[10]).toLocaleString() : "N/A";
+    // Branch Manager sees Pending claims
+    if (role === "branch_manager" && r[7] === "Pending" && requestBelongsToBranch(r, branchId)) {
+      shouldShow = true;
+    }
+    // Membership Specialist sees Under Verification claims
+    else if (role === "membership_specialist" && r[7] === "Under Verification" && requestBelongsToBranch(r, branchId)) {
+      shouldShow = true;
+    }
+
+    if (shouldShow) {
+      const dateStr = r[11] ? new Date(r[11]).toLocaleString() : "N/A";
 
       html += `
       <tr>
         <td>${r[0]}</td>
         <td>${r[1]}</td>
-        <td>₱${r[2]}</td>
-        <td>₱${r[3]}</td>
-        <td>₱${r[4]}</td>
-        <td>${r[5]}</td>
-        <td>${r[7]}</td>
-        <td><span class="${getStatusClass(r[6])}">${r[6]}</span></td>
+        <td>${formatDays(r[3])}</td>
+        <td>${formatMoney(r[4])}</td>
+        <td>${formatMoney(r[5])}</td>
+        <td>${r[6]}</td>
+        <td>${r[8]}</td>
+        <td><span class="${getStatusClass(r[7])}">${getStatusLabel(r[7])}</span></td>
         <td>${dateStr}</td>
         <td>
           <button class="btn blue" onclick="openModal('${r[0]}')">View</button>
@@ -951,40 +2719,43 @@ async function loadBranchTable() {
 async function loadBranchCounts() {
   const res = await fetch(API, {
     method: "POST",
+    headers: APPS_SCRIPT_JSON_HEADERS,
     body: JSON.stringify({ action: "getRequests" })
   });
 
-  const data = await res.json();
+  const data = await parseApiJsonResponse(res);
   const branchId = localStorage.getItem("branchid");
+  const role = getCurrentRole();
 
   let total = 0;
   let pending = 0;
-  let review = 0;
-  let forwarded = 0;
+  let underVerification = 0;
 
   for (let i = 1; i < data.length; i++) {
     // Only count requests from same branch
     if (!requestBelongsToBranch(data[i], branchId)) continue;
-    total++;
 
-    if (data[i][6] === "Pending") pending++;
-    if (data[i][6] === "Under Review") review++;
-    if (data[i][6] === "Forwarded") forwarded++;
+    if (role === "branch_manager") {
+      total++;
+      if (data[i][7] === "Pending") pending++;
+    } else if (role === "membership_specialist") {
+      total++;
+      if (data[i][7] === "Under Verification") underVerification++;
+    }
   }
 
   document.getElementById("bmTotal").innerText = total;
-  document.getElementById("bmPending").innerText = pending;
-  document.getElementById("bmReview").innerText = review;
-  document.getElementById("bmForwarded").innerText = forwarded;
+  document.getElementById("bmPending").innerText = pending || underVerification;
 }
 
 async function loadFinanceTable() {
   const res = await fetch(API, {
     method: "POST",
+    headers: APPS_SCRIPT_JSON_HEADERS,
     body: JSON.stringify({ action: "getRequests" })
   });
 
-  const data = await res.json();
+  const data = sortRequestDataNewestFirst(await parseApiJsonResponse(res));
   allRequests = data;
 
   renderFinanceTable();
@@ -994,7 +2765,8 @@ async function loadFinanceTable() {
 function renderFinanceTable(searchText = "", statusFilter = "All Statuses") {
   let html = "";
   let filteredCount = 0;
-  let forwardedCount = 0;
+  let relevantCount = 0;
+  const role = getCurrentRole();
 
   if (!Array.isArray(allRequests)) {
     document.getElementById("financeTable").innerHTML = "";
@@ -1005,27 +2777,39 @@ function renderFinanceTable(searchText = "", statusFilter = "All Statuses") {
     const r = allRequests[i];
     if (!Array.isArray(r) || !r.length) continue;
 
-    if (r[6] === "Forwarded") forwardedCount++;
+    let shouldShow = false;
 
-    const rowText = `${r[0]} ${r[1]} ${r[5]} ${r[7]} ${r[6]}`.toLowerCase();
+    // Finance Manager sees Under Review claims
+    if (role === "finance_head" && r[7] === "Under Review") {
+      shouldShow = true;
+      relevantCount++;
+    }
+    // Savings and Credit Head sees Forwarded claims
+    else if (role === "savings_credit_head" && r[7] === "Forwarded") {
+      shouldShow = true;
+      relevantCount++;
+    }
+
+    if (!shouldShow) continue;
+
+    const rowText = `${r[0]} ${r[1]} ${r[6]} ${r[8]} ${r[7]}`.toLowerCase();
     if (searchText && !rowText.includes(searchText.toLowerCase())) continue;
 
-    if (statusFilter === "Pending" && r[6] !== "Pending") continue;
-    if (statusFilter === "Forwarded" && r[6] !== "Forwarded") continue;
+    if (statusFilter !== "All Statuses" && statusFilter !== r[7]) continue;
 
     filteredCount++;
-    const dateStr = r[10] ? new Date(r[10]).toLocaleString() : "N/A";
+    const dateStr = r[11] ? new Date(r[11]).toLocaleString() : "N/A";
 
     html += `
       <tr>
         <td>${r[0]}</td>
         <td>${r[1]}</td>
-        <td>₱${r[2]}</td>
-        <td>₱${r[3]}</td>
-        <td>₱${r[4]}</td>
-        <td>${r[5]}</td>
+        <td>${formatDays(r[3])}</td>
+        <td>${formatMoney(r[4])}</td>
+        <td>${formatMoney(r[5])}</td>
+        <td>${r[6]}</td>
         <td>${r[7]}</td>
-        <td><span class="${getStatusClass(r[6])}">${r[6]}</span></td>
+        <td><span class="${getStatusClass(r[7])}">${getStatusLabel(r[7])}</span></td>
         <td>${dateStr}</td>
         <td>
           <button class="btn blue" onclick="openModal('${r[0]}')">View</button>
@@ -1038,10 +2822,10 @@ function renderFinanceTable(searchText = "", statusFilter = "All Statuses") {
   if (table) table.innerHTML = html || '<tr><td colspan="10">No requests found.</td></tr>';
 
   if (document.getElementById("approvalBadge")) {
-    document.getElementById("approvalBadge").innerText = forwardedCount;
+    document.getElementById("approvalBadge").innerText = relevantCount;
   }
   if (document.getElementById("tableCount")) {
-    document.getElementById("tableCount").innerText = `${filteredCount} requests · ${forwardedCount} awaiting your decision`;
+    document.getElementById("tableCount").innerText = `${filteredCount} requests${role === "savings_credit_head" ? " · " + relevantCount + " awaiting your decision" : ""}`;
   }
 }
 
@@ -1051,7 +2835,7 @@ function updateFinanceSummary() {
 
   for (let i = 1; i < allRequests.length; i++) {
     const r = allRequests[i];
-    if (Array.isArray(r) && r[6] === "Forwarded") forwardedCount++;
+    if (Array.isArray(r) && r[7] === "Forwarded") forwardedCount++;
   }
 
   if (document.getElementById("approvalBadge")) {
@@ -1140,19 +2924,19 @@ function loadBranchSubmitted() {
       for (let i = 1; i < data.length; i++) {
         const r = data[i];
         if (!Array.isArray(r)) continue;
-        if (r[6] === 'Forwarded' && requestBelongsToBranch(r, branchId)) {
+        if (r[7] === 'Forwarded' && requestBelongsToBranch(r, branchId)) {
           count++;
-          const dateStr = r[10] ? new Date(r[10]).toLocaleString() : 'N/A';
+          const dateStr = r[11] ? new Date(r[11]).toLocaleString() : 'N/A';
           html += `
             <tr>
               <td>${r[0]}</td>
               <td>${r[1]}</td>
-              <td>₱${r[2]}</td>
-              <td>₱${r[3]}</td>
-              <td>₱${r[4]}</td>
-              <td>${r[5]}</td>
+              <td>${formatDays(r[3])}</td>
+              <td>${formatMoney(r[4])}</td>
+              <td>${formatMoney(r[5])}</td>
+              <td>${r[6]}</td>
               <td>${r[7]}</td>
-              <td><span class="${getStatusClass(r[6])}">${r[6]}</span></td>
+              <td><span class="${getStatusClass(r[7])}">${getStatusLabel(r[7])}</span></td>
               <td>${dateStr}</td>
               <td><button class="btn blue" onclick="openModal('${r[0]}')">View</button></td>
             </tr>
@@ -1198,13 +2982,13 @@ function navigateToFinance(page) {
   const approvalQueue = document.getElementById('approvalQueueView');
   const dashboard = document.getElementById('dashboardView');
   const audit = document.getElementById('auditView');
-  
+
   if (approvalQueue) approvalQueue.style.display = (page === 'approval') ? 'block' : 'none';
   if (dashboard) dashboard.style.display = (page === 'dashboard') ? 'block' : 'none';
   if (audit) audit.style.display = (page === 'audit') ? 'block' : 'none';
 
   console.log("Navigate to finance page:", page);
-  
+
   if (page === 'approval') {
     loadFinanceTable();
   } else if (page === 'dashboard') {
@@ -1214,7 +2998,10 @@ function navigateToFinance(page) {
   }
 }
 
-function loadFinanceDashboard() {
+async function loadFinanceDashboard() {
+  if (!Array.isArray(allRequests) || allRequests.length === 0) {
+    await loadWorkflowRequests();
+  }
   if (!Array.isArray(allRequests)) return;
 
   let total = 0;
@@ -1227,9 +3014,9 @@ function loadFinanceDashboard() {
     if (!Array.isArray(r)) continue;
 
     total++;
-    if (r[6] === "Forwarded") awaiting++;
-    if (r[6] === "Approved") approved++;
-    if (r[6] === "Rejected") rejected++;
+    if (r[7] === "Forwarded") awaiting++;
+    if (r[7] === "Approved") approved++;
+    if (r[7] === "Rejected") rejected++;
   }
 
   document.getElementById("dashboardTotal").innerText = total;
@@ -1301,11 +3088,29 @@ function navigateToAdmin(section) {
 
 async function loadUsers() {
   try {
-    const res = await fetch(API, {
-      method: 'POST',
-      body: JSON.stringify({ action: 'getUsers' })
-    });
-    const data = await res.json();
+    const [usersRes, branchesRes] = await Promise.all([
+      fetch(API, {
+        method: 'POST',
+        body: JSON.stringify({ action: 'getUsers' })
+      }),
+      fetch(API, {
+        method: 'POST',
+        body: JSON.stringify({ action: 'getBranches' })
+      })
+    ]);
+    const [data, branchesData] = await Promise.all([
+      parseApiJsonResponse(usersRes),
+      parseApiJsonResponse(branchesRes)
+    ]);
+
+    if (branchesData.success) {
+      allBranches = (branchesData.branches || [])
+        .filter(branch => branch && (branch.branchID || branch.branchName))
+        .map(branch => ({
+          branchID: String(branch.branchID || branch.branchName || '').trim(),
+          branchName: String(branch.branchName || branch.branchID || '').trim()
+        }));
+    }
 
     if (!data.success) {
       alert(data.message || 'Failed to load users.');
@@ -1342,7 +3147,7 @@ function renderUsersTable(users) {
         <td>${escapeHtml(user.fullname)}</td>
         <td>${escapeHtml(user.position)}</td>
         <td>${escapeHtml(getRoleLabel(user.role))}</td>
-        <td>${escapeHtml(user.branchid || '-')}</td>
+        <td>${escapeHtml(getBranchName(user.branchid) || user.branchid || '-')}</td>
         <td>${formatFirstLoginFlag(Boolean(user.firstLogin))}</td>
         <td><button class="btn blue" onclick="openUserModal('edit', ${sourceIndex})">Edit</button></td>
       </tr>
@@ -1358,9 +3163,9 @@ function filterUsersTable() {
   const roleFilter = document.getElementById('userRoleFilter')?.value || 'All Roles';
 
   const filtered = allUsers.filter(user => {
-    const rowText = `${user.email} ${user.fullname} ${user.position} ${user.branchid} ${user.role}`.toLowerCase();
+    const rowText = `${user.email} ${user.fullname} ${user.position} ${user.branchid} ${getBranchName(user.branchid)} ${user.role}`.toLowerCase();
     const matchesSearch = !searchText || rowText.includes(searchText);
-    const matchesRole = roleFilter === 'All Roles' || user.role === roleFilter;
+    const matchesRole = roleFilter === 'All Roles' || normalizeRole(user.role) === roleFilter;
     return matchesSearch && matchesRole;
   });
 
@@ -1388,7 +3193,7 @@ function resetUserForm() {
   if (passwordInput) passwordInput.value = '';
   if (fullnameInput) fullnameInput.value = '';
   if (positionInput) positionInput.value = '';
-  if (roleInput) roleInput.value = 'teller';
+  if (roleInput) roleInput.value = 'crs';
   if (branchInput) branchInput.value = '';
   if (firstLoginInput) firstLoginInput.checked = true;
 }
@@ -1424,7 +3229,7 @@ function openUserModal(mode = 'create', index = null) {
     if (passwordInput) passwordInput.value = '';
     if (fullnameInput) fullnameInput.value = user.fullname || '';
     if (positionInput) positionInput.value = user.position || '';
-    if (roleInput) roleInput.value = user.role || 'teller';
+    if (roleInput) roleInput.value = normalizeRole(user.role) || 'crs';
     if (branchInput) branchInput.value = user.branchid || '';
     if (firstLoginInput) firstLoginInput.checked = Boolean(user.firstLogin);
   }
@@ -1494,7 +3299,7 @@ async function loadAdminTable() {
     method: 'POST',
     body: JSON.stringify({ action: 'getRequests' })
   });
-  const data = await res.json();
+  const data = sortRequestDataNewestFirst(await res.json());
   allRequests = data;
 
   let html = '';
@@ -1504,18 +3309,18 @@ async function loadAdminTable() {
     const r = data[i];
     if (!Array.isArray(r) || !r.length) continue;
     count++;
-    const dateStr = r[10] ? new Date(r[10]).toLocaleString() : 'N/A';
+    const dateStr = r[11] ? new Date(r[11]).toLocaleString() : 'N/A';
 
     html += `
       <tr>
         <td>${r[0]}</td>
         <td>${r[1]}</td>
-        <td>₱${r[2]}</td>
-        <td>₱${r[3]}</td>
-        <td>₱${r[4]}</td>
-        <td>${r[5]}</td>
-        <td>${r[8] || '—'}</td>
-        <td><span class="${getStatusClass(r[6])}">${r[6]}</span></td>
+        <td>${formatDays(r[3])}</td>
+        <td>${formatMoney(r[4])}</td>
+        <td>${formatMoney(r[5])}</td>
+        <td>${r[6]}</td>
+        <td>${r[9] || '—'}</td>
+        <td><span class="${getStatusClass(r[7])}">${getStatusLabel(r[7])}</span></td>
         <td>${dateStr}</td>
         <td><button class="btn blue" onclick="openModal('${r[0]}')">View</button></td>
       </tr>
@@ -1545,9 +3350,9 @@ async function loadAdminCounts() {
     const r = data[i];
     if (!Array.isArray(r) || !r.length) continue;
     total++;
-    if (r[6] === 'Pending') pending++;
-    if (r[6] === 'Forwarded') forwarded++;
-    if (r[6] === 'Approved') approved++;
+    if (r[7] === 'Pending') pending++;
+    if (r[7] === 'Forwarded') forwarded++;
+    if (r[7] === 'Approved') approved++;
   }
 
   const totalEl = document.getElementById('adminTotal');
@@ -1573,23 +3378,23 @@ function filterAdminTable() {
     const r = allRequests[i];
     if (!Array.isArray(r) || !r.length) continue;
 
-    const rowText = `${r[0]} ${r[1]} ${r[5]} ${r[8]} ${r[6]}`.toLowerCase();
+    const rowText = `${r[0]} ${r[1]} ${r[6]} ${r[9]} ${r[7]}`.toLowerCase();
     if (searchText && !rowText.includes(searchText)) continue;
-    if (statusFilter !== 'All Statuses' && r[6] !== statusFilter) continue;
+    if (statusFilter !== 'All Statuses' && r[7] !== statusFilter) continue;
 
     count++;
-    const dateStr = r[10] ? new Date(r[10]).toLocaleString() : 'N/A';
+    const dateStr = r[11] ? new Date(r[11]).toLocaleString() : 'N/A';
 
     html += `
       <tr>
         <td>${r[0]}</td>
         <td>${r[1]}</td>
-        <td>₱${r[2]}</td>
-        <td>₱${r[3]}</td>
-        <td>₱${r[4]}</td>
-        <td>${r[5]}</td>
-        <td>${r[8] || '—'}</td>
-        <td><span class="${getStatusClass(r[6])}">${r[6]}</span></td>
+        <td>${formatDays(r[3])}</td>
+        <td>${formatMoney(r[4])}</td>
+        <td>${formatMoney(r[5])}</td>
+        <td>${r[6]}</td>
+        <td>${r[9] || '—'}</td>
+        <td><span class="${getStatusClass(r[7])}">${getStatusLabel(r[7])}</span></td>
         <td>${dateStr}</td>
         <td><button class="btn blue" onclick="openModal('${r[0]}')">View</button></td>
       </tr>
@@ -1613,16 +3418,18 @@ async function loadSettings() {
 
     const tellerSignatory = document.getElementById('tellerSignatory');
     const branchSignatory = document.getElementById('branchManagerSignatory');
-    const financeSignatory = document.getElementById('financeManagerSignatory');
+    const financeHeadSignatory = document.getElementById('financeHeadSignatory');
+    const savingsCreditHeadSignatory = document.getElementById('savingsCreditHeadSignatory');
 
     if (tellerSignatory) tellerSignatory.value = settings.tellerName || '';
-    if (branchSignatory) branchSignatory.value = settings.branchManagerName || '';
-    if (financeSignatory) financeSignatory.value = settings.financeManagerName || '';
+    if (branchSignatory) branchSignatory.value = settings.membershipSpecialistName || settings.branchManagerName || '';
+    if (financeHeadSignatory) financeHeadSignatory.value = settings.financeHeadName || '';
+    if (savingsCreditHeadSignatory) savingsCreditHeadSignatory.value = settings.savingsCreditHeadName || settings.financeManagerName || '';
 
     const previewMap = [
-      {id: 'tellerSignaturePreview', value: settings.tellerSignatureData},
-      {id: 'branchSignaturePreview', value: settings.branchManagerSignatureData},
-      {id: 'financeSignaturePreview', value: settings.financeManagerSignatureData},
+      {id: 'mrdSignaturePreview', value: settings.membershipSpecialistSignatureData || settings.branchManagerSignatureData},
+      {id: 'financeHeadSignaturePreview', value: settings.financeHeadSignatureData},
+      {id: 'savingsCreditHeadSignaturePreview', value: settings.savingsCreditHeadSignatureData || settings.financeManagerSignatureData},
       {id: 'logoPreview', value: settings.reportHeaderImage}
     ];
 
@@ -1633,6 +3440,15 @@ async function loadSettings() {
         img.style.display = item.value ? 'block' : 'none';
       }
     });
+
+    // Load segmentation rates
+    const silverRate = document.getElementById('silverRate');
+    const goldRate = document.getElementById('goldRate');
+    const diamondRate = document.getElementById('diamondRate');
+
+    if (silverRate) silverRate.value = settings.silverRate || '300';
+    if (goldRate) goldRate.value = settings.goldRate || '400';
+    if (diamondRate) diamondRate.value = settings.diamondRate || '500';
   } catch (err) {
     console.error('Failed to load admin settings', err);
   }
@@ -1641,14 +3457,18 @@ async function loadSettings() {
 async function saveSignatorySettings() {
   const tellerSignatory = document.getElementById('tellerSignatory')?.value || '';
   const branchSignatory = document.getElementById('branchManagerSignatory')?.value || '';
-  const financeSignatory = document.getElementById('financeManagerSignatory')?.value || '';
+  const financeHeadSignatory = document.getElementById('financeHeadSignatory')?.value || '';
+  const savingsCreditHeadSignatory = document.getElementById('savingsCreditHeadSignatory')?.value || '';
 
   const res = await fetch(API, {
     method: 'POST',
     body: JSON.stringify({ action: 'saveSettings', settings: {
       tellerName: tellerSignatory,
       branchManagerName: branchSignatory,
-      financeManagerName: financeSignatory
+      financeManagerName: savingsCreditHeadSignatory,
+      membershipSpecialistName: branchSignatory,
+      financeHeadName: financeHeadSignatory,
+      savingsCreditHeadName: savingsCreditHeadSignatory
     }})
   });
   const data = await res.json();
@@ -1659,11 +3479,51 @@ async function saveSignatorySettings() {
   }
 }
 
+function getSignatureConfig(role) {
+  const configs = {
+    teller: {
+      inputId: 'tellerSignatureFile',
+      previewId: 'tellerSignaturePreview',
+      key: 'tellerSignatureData'
+    },
+    branchManager: {
+      inputId: 'branchSignatureFile',
+      previewId: 'branchSignaturePreview',
+      key: 'branchManagerSignatureData'
+    },
+    financeManager: {
+      inputId: 'financeSignatureFile',
+      previewId: 'financeSignaturePreview',
+      key: 'financeManagerSignatureData'
+    },
+    membershipSpecialist: {
+      inputId: 'mrdSignatureFile',
+      previewId: 'mrdSignaturePreview',
+      key: 'membershipSpecialistSignatureData'
+    },
+    financeHead: {
+      inputId: 'financeHeadSignatureFile',
+      previewId: 'financeHeadSignaturePreview',
+      key: 'financeHeadSignatureData'
+    },
+    savingsCreditHead: {
+      inputId: 'savingsCreditHeadSignatureFile',
+      previewId: 'savingsCreditHeadSignaturePreview',
+      key: 'savingsCreditHeadSignatureData'
+    }
+  };
+  return configs[role] || null;
+}
+
 function uploadSignature(role) {
-  const inputId = role === 'teller' ? 'tellerSignatureFile' : role === 'branchManager' ? 'branchSignatureFile' : 'financeSignatureFile';
-  const previewId = role === 'teller' ? 'tellerSignaturePreview' : role === 'branchManager' ? 'branchSignaturePreview' : 'financeSignaturePreview';
-  const input = document.getElementById(inputId);
-  const preview = document.getElementById(previewId);
+  const config = getSignatureConfig(role);
+  if (!config) {
+    alert('Invalid signature role.');
+    return;
+  }
+
+  const input = document.getElementById(config.inputId);
+  const preview = document.getElementById(config.previewId);
   if (!input || !input.files || !input.files[0]) {
     alert('Please select a signature file to upload.');
     return;
@@ -1694,10 +3554,14 @@ function uploadSignature(role) {
 }
 
 async function clearSignature(role) {
-  const previewId = role === 'teller' ? 'tellerSignaturePreview' : role === 'branchManager' ? 'branchSignaturePreview' : 'financeSignaturePreview';
-  const fileId = role === 'teller' ? 'tellerSignatureFile' : role === 'branchManager' ? 'branchSignatureFile' : 'financeSignatureFile';
-  const preview = document.getElementById(previewId);
-  const input = document.getElementById(fileId);
+  const config = getSignatureConfig(role);
+  if (!config) {
+    alert('Invalid signature role.');
+    return;
+  }
+
+  const preview = document.getElementById(config.previewId);
+  const input = document.getElementById(config.inputId);
 
   if (preview) {
     preview.src = '';
@@ -1707,10 +3571,13 @@ async function clearSignature(role) {
     input.value = '';
   }
 
-  const key = role === 'teller' ? 'tellerSignatureData' : role === 'branchManager' ? 'branchManagerSignatureData' : 'financeManagerSignatureData';
+  const settingsToClear = { [config.key]: '' };
+  if (role === 'membershipSpecialist') settingsToClear.branchManagerSignatureData = '';
+  if (role === 'savingsCreditHead') settingsToClear.financeManagerSignatureData = '';
+
   await fetch(API, {
     method: 'POST',
-    body: JSON.stringify({ action: 'saveSettings', settings: { [key]: '' } })
+    body: JSON.stringify({ action: 'saveSettings', settings: settingsToClear })
   });
 }
 
@@ -1777,6 +3644,41 @@ async function clearLogo() {
   alert('Logo cleared successfully.');
 }
 
+async function saveSegmentationRates() {
+  const silverRate = document.getElementById('silverRate')?.value || '300';
+  const goldRate = document.getElementById('goldRate')?.value || '400';
+  const diamondRate = document.getElementById('diamondRate')?.value || '500';
+
+  if (!silverRate || !goldRate || !diamondRate) {
+    alert('Please fill in all segmentation rate fields.');
+    return;
+  }
+
+  try {
+    const res = await fetch(API, {
+      method: 'POST',
+      body: JSON.stringify({
+        action: 'saveSettings',
+        settings: {
+          silverRate: parseFloat(silverRate),
+          goldRate: parseFloat(goldRate),
+          diamondRate: parseFloat(diamondRate)
+        }
+      })
+    });
+    const data = await res.json();
+    if (data.success) {
+      alert('Segmentation rates saved successfully.');
+      loadSettings(); // Refresh the values
+    } else {
+      alert('Failed to save segmentation rates.');
+    }
+  } catch (err) {
+    console.error('Failed to save segmentation rates:', err);
+    alert('Error saving segmentation rates.');
+  }
+}
+
 // 🔧 TELLER NAVIGATION
 function navigateToTeller(page) {
   // Update sidebar active state
@@ -1824,15 +3726,16 @@ function navigateToTeller(page) {
 }
 
 function initializeTellerPage() {
-  // No additional initialization needed
+  bindTellerClaimForm();
+  loadTellerReferenceData().catch(err => console.warn("Unable to load teller reference data:", err));
 }
 
 function loadTellerSubmissions() {
   if (!Array.isArray(allRequests)) return;
-  
+
   const tellerEmail = localStorage.getItem("user");
   const tellerFullname = localStorage.getItem("fullname");
-  
+
   let html = "";
   let count = 0;
 
@@ -1840,20 +3743,20 @@ function loadTellerSubmissions() {
     const r = allRequests[i];
     if (!Array.isArray(r) || !r.length) continue;
 
-    // Filter by teller email or fullname (column 7 is ProcessedBy which should have teller name)
-    if (r[7] === tellerEmail || r[7] === tellerFullname) {
+    // Filter by teller email or fullname (column 8 is EncodedBy which should have teller name)
+    if (r[8] === tellerEmail || r[8] === tellerFullname) {
       count++;
-      const dateStr = r[10] || (r[8] ? new Date(r[8]).toLocaleString() : "N/A");
+      const dateStr = r[11] ? new Date(r[11]).toLocaleString() : "N/A";
 
       html += `
       <tr>
         <td>${r[0]}</td>
         <td>${r[1]}</td>
-        <td>₱${r[2]}</td>
-        <td>₱${r[3]}</td>
-        <td>₱${r[4]}</td>
-        <td>${r[5]}</td>
-        <td><span class="${getStatusClass(r[6])}">${r[6]}</span></td>
+        <td>${formatDays(r[3])}</td>
+        <td>${formatMoney(r[4])}</td>
+        <td>${formatMoney(r[5])}</td>
+        <td>${r[6]}</td>
+        <td><span class="${getStatusClass(r[7])}">${getStatusLabel(r[7])}</span></td>
         <td>${dateStr}</td>
         <td>
           <button class="btn blue" onclick="openModal('${r[0]}')">View</button>
@@ -1872,10 +3775,10 @@ function loadTellerSubmissions() {
 
 function loadTellerHistory() {
   if (!Array.isArray(allRequests)) return;
-  
+
   const tellerEmail = localStorage.getItem("user");
   const tellerFullname = localStorage.getItem("fullname");
-  
+
   let html = "";
   let count = 0;
 
@@ -1884,20 +3787,20 @@ function loadTellerHistory() {
     if (!Array.isArray(r) || !r.length) continue;
 
     // Filter by teller email or fullname
-    if (r[7] === tellerEmail || r[7] === tellerFullname) {
+    if (r[8] === tellerEmail || r[8] === tellerFullname) {
       count++;
-      const dateStr = r[10] || (r[8] ? new Date(r[8]).toLocaleString() : "N/A");
+      const dateStr = r[11] ? new Date(r[11]).toLocaleString() : "N/A";
 
       html += `
       <tr>
         <td>${r[0]}</td>
         <td>${r[1]}</td>
-        <td>₱${r[3]}</td>
-        <td>${r[5]}</td>
-        <td><span class="${getStatusClass(r[6])}">${r[6]}</span></td>
-        <td>${r[7]}</td>
-        <td>${r[8] || "—"}</td>
+        <td>${formatMoney(r[5])}</td>
+        <td>${r[6]}</td>
+        <td><span class="${getStatusClass(r[7])}">${getStatusLabel(r[7])}</span></td>
+        <td>${r[8]}</td>
         <td>${r[9] || "—"}</td>
+        <td>${r[10] || "—"}</td>
         <td>${dateStr}</td>
       </tr>
       `;
@@ -1909,4 +3812,981 @@ function loadTellerHistory() {
 
   const historyCount = document.getElementById("historyCount");
   if (historyCount) historyCount.innerText = `${count} transaction${count !== 1 ? 's' : ''}`;
+}
+
+function formatMoney(value) {
+  return `PHP ${(parseFloat(value) || 0).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+}
+
+function formatDays(value) {
+  const days = Number(value) || 0;
+  return `${days} day${days === 1 ? "" : "s"}`;
+}
+
+function renderClaimRow(r, extraColumn = "") {
+  const dateStr = r[11] ? new Date(r[11]).toLocaleString() : "N/A";
+  return `
+    <tr>
+      <td>${r[0]}</td>
+      <td>${escapeHtml(r[1])}</td>
+      <td>${formatDays(r[3])}</td>
+      <td>${formatMoney(r[4])}</td>
+      <td>${formatMoney(r[5])}</td>
+      <td>${escapeHtml(r[6])}</td>
+      ${extraColumn}
+      <td><span class="${getStatusClass(r[7])}">${getStatusLabel(r[7])}</span></td>
+      <td>${dateStr}</td>
+      <td><button class="btn blue" onclick="openModal('${r[0]}')">View</button></td>
+    </tr>
+  `;
+}
+
+function openModal(id) {
+  const r = allRequests.find(x => Array.isArray(x) && x[0] === id);
+  if (!r) return;
+
+  window.currentRequestId = id;
+
+  const dateStr = r[11] ? new Date(r[11]).toLocaleDateString() : "N/A";
+  const encodedBy = r[8] || localStorage.getItem("fullname") || "Unknown";
+  const verifierName = r[9] || "N/A";
+  const financeCheckedBy = r[15] || "N/A";
+  const approverName = r[10] || "N/A";
+  const workflowNotes = r[14] || "";
+  const attachments = normalizeAttachments(r[16]);
+  window.currentModalAttachments = attachments;
+  const attachmentHtml = attachments.length
+    ? attachments.map(renderAttachmentPreview).join("")
+    : '<span style="color:#777;">No attachments uploaded.</span>';
+
+  document.getElementById("modalContent").innerHTML = `
+    <div style="margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px;">
+      <h3 style="margin: 0 0 5px 0;">Claim Details - ${r[0]}</h3>
+      <p style="margin: 0; font-size: 13px; color: #666;">Member: ${escapeHtml(r[1])} - Submitted ${dateStr}</p>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 20px; margin-bottom: 20px;">
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Member Name</label>
+        <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${escapeHtml(r[1])}</p>
+      </div>
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Encoded By</label>
+        <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${escapeHtml(encodedBy)}</p>
+      </div>
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Contact Number</label>
+        <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${escapeHtml(r[12] || "N/A")}</p>
+      </div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px;">
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Computed Days</label>
+        <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${formatDays(r[3])}</p>
+      </div>
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Rate / Day</label>
+        <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${formatMoney(r[4])}</p>
+      </div>
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Total Claimable Amount</label>
+        <p style="margin: 0; font-size: 16px; font-weight: 700; color: #16a085;">${formatMoney(r[5])}</p>
+      </div>
+    </div>
+
+    <div style="margin-bottom: 20px;">
+      <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Hospital</label>
+      <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(r[6])}</p>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(4, 1fr); gap: 16px; margin-bottom: 20px;">
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Segmentation</label>
+        <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(r[18] || "N/A")}</p>
+      </div>
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Branch</label>
+        <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(getRequestBranchName(r) || "N/A")}</p>
+      </div>
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Date Admitted</label>
+        <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(r[21] || "N/A")}</p>
+      </div>
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Date Discharged</label>
+        <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(r[22] || "N/A")}</p>
+      </div>
+    </div>
+
+    <div style="margin-bottom: 20px;">
+      <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Attachments</label>
+      <div style="font-size: 14px; color: #333;">${attachmentHtml}</div>
+    </div>
+
+    <div style="display: grid; grid-template-columns: repeat(3, 1fr); gap: 16px; margin-bottom: 20px;">
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Verified By</label>
+        <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(verifierName)}</p>
+      </div>
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Finance Checked By</label>
+        <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(financeCheckedBy)}</p>
+      </div>
+      <div>
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Final Decision By</label>
+        <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(approverName)}</p>
+      </div>
+    </div>
+
+    <div style="display: flex; align-items: center; gap: 10px;">
+      <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600;">Current Status:</label>
+      <span class="${getStatusClass(r[7])}" style="padding: 4px 10px; border-radius: 20px; font-size: 12px;">${getStatusLabel(r[7])}</span>
+    </div>
+    ${workflowNotes ? `
+      <div style="margin-top: 20px; padding: 16px; background: #fff4f4; border-left: 4px solid #dc2626; border-radius: 6px;">
+        <label style="font-size: 11px; color: #b91c1c; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Workflow Notes</label>
+        <p style="margin: 0; font-size: 14px; color: #7f1d1d;">${escapeHtml(workflowNotes)}</p>
+      </div>
+    ` : ""}
+  `;
+
+  const approveBtn = document.getElementById("approveBtn");
+  const rejectBtn = document.getElementById("rejectBtn");
+  if (approveBtn) approveBtn.style.display = "none";
+  if (rejectBtn) rejectBtn.style.display = "none";
+
+  const modalFooter = document.querySelector(".modal-footer");
+  if (modalFooter) {
+    modalFooter.querySelectorAll(".role-action-btn").forEach(btn => btn.remove());
+    const role = getCurrentRole();
+
+    // Branch Manager checks Pending claims
+    if (role === "branch_manager" && r[7] === "Pending") {
+      const returnBtn = document.createElement("button");
+      returnBtn.className = "btn red role-action-btn";
+      returnBtn.style.cssText = "margin-left: auto; margin-right: 10px;";
+      returnBtn.textContent = "Return to CRS";
+      returnBtn.onclick = () => updateStatus(r[0], "Returned");
+      modalFooter.appendChild(returnBtn);
+
+      const forwardBtn = document.createElement("button");
+      forwardBtn.className = "btn green role-action-btn";
+      forwardBtn.textContent = "Forward to Membership Specialist";
+      forwardBtn.onclick = () => updateStatus(r[0], "Under Verification");
+      modalFooter.appendChild(forwardBtn);
+    }
+    // Membership Specialist checks Under Verification claims
+    else if (role === "membership_specialist" && r[7] === "Under Verification") {
+      const returnBtn = document.createElement("button");
+      returnBtn.className = "btn red role-action-btn";
+      returnBtn.style.cssText = "margin-left: auto; margin-right: 10px;";
+      returnBtn.textContent = "Return to Branch Manager";
+      returnBtn.onclick = () => updateStatus(r[0], "Pending");
+      modalFooter.appendChild(returnBtn);
+
+      const forwardBtn = document.createElement("button");
+      forwardBtn.className = "btn green role-action-btn";
+      forwardBtn.textContent = "Forward to Finance Manager";
+      forwardBtn.onclick = () => updateStatus(r[0], "Under Review");
+      modalFooter.appendChild(forwardBtn);
+    }
+    // Finance Manager checks Under Review claims
+    else if (role === "finance_head" && r[7] === "Under Review") {
+      const returnBtn = document.createElement("button");
+      returnBtn.className = "btn red role-action-btn";
+      returnBtn.style.cssText = "margin-left: auto; margin-right: 10px;";
+      returnBtn.textContent = "Return to Membership Specialist";
+      returnBtn.onclick = () => updateStatus(r[0], "Under Verification");
+      modalFooter.appendChild(returnBtn);
+
+      const forwardBtn = document.createElement("button");
+      forwardBtn.className = "btn green role-action-btn";
+      forwardBtn.textContent = "Forward to Approver";
+      forwardBtn.onclick = () => updateStatus(r[0], "Forwarded");
+      modalFooter.appendChild(forwardBtn);
+    }
+    // Savings and Credit Head approves Forwarded claims
+    else if (role === "savings_credit_head" && r[7] === "Forwarded") {
+      const returnBtn = document.createElement("button");
+      returnBtn.className = "btn red role-action-btn";
+      returnBtn.style.cssText = "margin-left: auto; margin-right: 10px;";
+      returnBtn.textContent = "Return to Finance Manager";
+      returnBtn.onclick = () => updateStatus(r[0], "Under Review");
+      modalFooter.appendChild(returnBtn);
+
+      if (approveBtn) approveBtn.style.display = "block";
+      if (rejectBtn) rejectBtn.style.display = "block";
+    }
+
+    if (role === "crs" && r[7] === "Returned") {
+      const editBtn = document.createElement("button");
+      editBtn.className = "btn blue role-action-btn";
+      editBtn.style.cssText = "margin-left: auto; margin-right: 10px;";
+      editBtn.textContent = "Edit Claim";
+      editBtn.onclick = () => {
+        closeModal();
+        openEditRequest(r[0]);
+      };
+      modalFooter.appendChild(editBtn);
+    }
+
+    if (role === "crs" && r[7] === "Approved") {
+      const printBtn = document.createElement("button");
+      printBtn.className = "btn blue role-action-btn";
+      printBtn.style.cssText = "margin-left: auto; margin-right: 10px;";
+      printBtn.textContent = "Print";
+      printBtn.onclick = printRequest;
+      modalFooter.appendChild(printBtn);
+    }
+  }
+
+  document.getElementById("modal").style.display = "flex";
+}
+
+async function loadBranchTable() {
+  const res = await fetch(API, {
+    method: "POST",
+    body: JSON.stringify({ action: "getRequests" })
+  });
+
+  const data = sortRequestDataNewestFirst(await res.json());
+  allRequests = data;
+
+  const branchId = localStorage.getItem("branchid");
+  const role = getCurrentRole();
+  const targetStatus = getWorkflowQueueStatus(role);
+  const copy = getBranchQueueCopy(role);
+  let html = "";
+  let count = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (!Array.isArray(r) || !userCanViewBranchRequest(r, role, branchId)) continue;
+    if (targetStatus && r[7] !== targetStatus) continue;
+    count++;
+    html += renderClaimRow(r, `<td>${escapeHtml(r[8] || "")}</td>`);
+  }
+
+  const table = document.getElementById("branchTable");
+  if (table) table.innerHTML = html || `<tr><td colspan="10">${copy.empty}</td></tr>`;
+  const tableCount = document.getElementById("tableCount");
+  if (tableCount) tableCount.innerText = `${count} claim${count !== 1 ? "s" : ""} ${copy.tableCount}`;
+  const reviewBadge = document.getElementById("reviewBadge");
+  if (reviewBadge) reviewBadge.innerText = count;
+}
+
+async function loadBranchCounts() {
+  const res = await fetch(API, {
+    method: "POST",
+    body: JSON.stringify({ action: "getRequests" })
+  });
+
+  const data = await res.json();
+  const branchId = localStorage.getItem("branchid");
+  const role = getCurrentRole();
+  let total = 0;
+  let pending = 0;
+  let underVerification = 0;
+  let review = 0;
+  let forwarded = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    if (!Array.isArray(data[i]) || !userCanViewBranchRequest(data[i], role, branchId)) continue;
+    total++;
+    if (data[i][7] === "Pending") pending++;
+    if (data[i][7] === "Under Verification") underVerification++;
+    if (data[i][7] === "Under Review") review++;
+    if (data[i][7] === "Forwarded") forwarded++;
+  }
+
+  const queueCount = role === "membership_specialist" ? underVerification : pending;
+
+  if (document.getElementById("bmTotal")) document.getElementById("bmTotal").innerText = total;
+  if (document.getElementById("bmPending")) document.getElementById("bmPending").innerText = queueCount;
+  if (document.getElementById("bmReview")) document.getElementById("bmReview").innerText = review;
+  if (document.getElementById("bmForwarded")) document.getElementById("bmForwarded").innerText = forwarded;
+  if (document.getElementById("dashboardTotal")) document.getElementById("dashboardTotal").innerText = total;
+  if (document.getElementById("dashboardPending")) document.getElementById("dashboardPending").innerText = queueCount;
+  if (document.getElementById("dashboardReview")) document.getElementById("dashboardReview").innerText = review;
+  if (document.getElementById("dashboardForwarded")) document.getElementById("dashboardForwarded").innerText = forwarded;
+  if (document.getElementById("reviewBadge")) document.getElementById("reviewBadge").innerText = queueCount;
+}
+
+function loadBranchSubmitted() {
+  const branchId = localStorage.getItem("branchid");
+  const role = getCurrentRole();
+  const submittedStatuses = role === "branch_manager"
+    ? ["Under Verification", "Under Review", "Forwarded", "Approved", "Rejected"]
+    : ["Under Review", "Forwarded", "Approved", "Rejected"];
+  fetch(API, {
+    method: "POST",
+    body: JSON.stringify({ action: "getRequests" })
+  })
+    .then(res => res.json())
+    .then(data => {
+      data = sortRequestDataNewestFirst(data);
+      let html = "";
+      let count = 0;
+      allRequests = data;
+
+      for (let i = 1; i < data.length; i++) {
+        const r = data[i];
+        if (!Array.isArray(r) || !userCanViewBranchRequest(r, role, branchId)) continue;
+        if (!submittedStatuses.includes(r[7])) continue;
+        count++;
+        html += renderClaimRow(r, `<td>${escapeHtml(r[9] || "")}</td>`);
+      }
+
+      const submittedTable = document.getElementById("submittedTable");
+      if (submittedTable) submittedTable.innerHTML = html || '<tr><td colspan="10">No verified claims found.</td></tr>';
+      const submittedCount = document.getElementById("submittedCount");
+      if (submittedCount) submittedCount.innerText = `${count} claim${count !== 1 ? "s" : ""}`;
+    })
+    .catch(err => console.error("Failed to load submitted claims", err));
+}
+
+async function loadFinanceTable() {
+  allRequests = await loadWorkflowRequests(true);
+  renderFinanceTable();
+  updateFinanceSummary();
+}
+
+function renderFinanceTable(searchText = "", statusFilter = "All Statuses") {
+  const role = getCurrentRole();
+  const targetStatus = getWorkflowQueueStatus(role);
+
+  let html = "";
+  let filteredCount = 0;
+  let queueCount = 0;
+
+  if (!Array.isArray(allRequests)) {
+    const table = document.getElementById("financeTable");
+    if (table) table.innerHTML = "";
+    return;
+  }
+
+  for (let i = 1; i < allRequests.length; i++) {
+    const r = allRequests[i];
+    if (!Array.isArray(r) || !r.length) continue;
+    if (targetStatus && r[7] === targetStatus) queueCount++;
+
+    const rowText = `${r[0]} ${r[1]} ${r[6]} ${r[8]} ${r[9]} ${r[15]} ${r[7]}`.toLowerCase();
+    if (searchText && !rowText.includes(searchText.toLowerCase())) continue;
+    if (targetStatus && r[7] !== targetStatus) continue;
+    if (statusFilter !== "All Statuses" && r[7] !== statusFilter) continue;
+
+    filteredCount++;
+    const extraColumn = role === "finance_head"
+      ? `<td>${escapeHtml(r[9] || "")}</td>`
+      : `<td>${escapeHtml(r[15] || r[9] || "")}</td>`;
+    html += renderClaimRow(r, extraColumn);
+  }
+
+  const table = document.getElementById("financeTable");
+  if (table) table.innerHTML = html || '<tr><td colspan="10">No claims found.</td></tr>';
+  if (document.getElementById("approvalBadge")) document.getElementById("approvalBadge").innerText = queueCount;
+  if (document.getElementById("tableCount")) {
+    const label = role === "finance_head" ? "awaiting finance review" : "awaiting final decision";
+    document.getElementById("tableCount").innerText = `${filteredCount} claim${filteredCount !== 1 ? "s" : ""} listed - ${queueCount} ${label}`;
+  }
+}
+
+function updateFinanceSummary() {
+  if (!Array.isArray(allRequests)) return;
+  const role = getCurrentRole();
+  const targetStatus = getWorkflowQueueStatus(role);
+
+  let queueCount = 0;
+
+  for (let i = 1; i < allRequests.length; i++) {
+    const r = allRequests[i];
+    if (Array.isArray(r) && r[7] === targetStatus) queueCount++;
+  }
+
+  if (document.getElementById("approvalBadge")) document.getElementById("approvalBadge").innerText = queueCount;
+}
+
+async function loadWorkflowRequests(forceRefresh = false) {
+  if (!forceRefresh && Array.isArray(allRequests) && allRequests.length > 0) {
+    return allRequests;
+  }
+
+  if (!workflowRequestsPromise || forceRefresh) {
+    workflowRequestsPromise = callAppsScriptJsonp({ action: "getRequests" })
+      .then(data => {
+        allRequests = sortRequestDataNewestFirst(data);
+        return allRequests;
+      })
+      .finally(() => {
+        workflowRequestsPromise = null;
+      });
+  }
+
+  return workflowRequestsPromise;
+}
+
+async function verifyRequestStatus(requestId, status) {
+  const requests = await loadWorkflowRequests(true);
+  const row = Array.isArray(requests)
+    ? requests.find(item => Array.isArray(item) && String(item[0]) === String(requestId))
+    : null;
+
+  return Boolean(row && row[7] === status);
+}
+
+async function loadDashboardCounts() {
+  const data = await loadWorkflowRequests();
+  const role = getCurrentRole();
+  const targetStatus = getWorkflowQueueStatus(role);
+
+  let awaiting = 0;
+  let approved = 0;
+  let rejected = 0;
+  let returned = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (!Array.isArray(r)) continue;
+    if (r[7] === targetStatus) awaiting++;
+    if (r[7] === "Approved") approved++;
+    if (r[7] === "Rejected") rejected++;
+    if (r[7] === "Returned") returned++;
+  }
+
+  if (document.getElementById("countAwaiting")) document.getElementById("countAwaiting").innerText = awaiting;
+  if (document.getElementById("countApproved")) document.getElementById("countApproved").innerText = approved;
+  if (document.getElementById("countRejected")) document.getElementById("countRejected").innerText = rejected;
+  if (document.getElementById("countReview")) document.getElementById("countReview").innerText = returned;
+}
+
+async function loadFinanceDashboard() {
+  if (!Array.isArray(allRequests) || allRequests.length === 0) {
+    await loadWorkflowRequests();
+  }
+  if (!Array.isArray(allRequests)) return;
+
+  let total = 0;
+  let awaiting = 0;
+  let approved = 0;
+  let rejected = 0;
+
+  const role = getCurrentRole();
+  const targetStatus = getWorkflowQueueStatus(role);
+
+  for (let i = 1; i < allRequests.length; i++) {
+    const r = allRequests[i];
+    if (!Array.isArray(r)) continue;
+    total++;
+    if (r[7] === targetStatus) awaiting++;
+    if (r[7] === "Approved") approved++;
+    if (r[7] === "Rejected") rejected++;
+  }
+
+  if (document.getElementById("dashboardTotal")) document.getElementById("dashboardTotal").innerText = total;
+  if (document.getElementById("dashboardAwaiting")) document.getElementById("dashboardAwaiting").innerText = awaiting;
+  if (document.getElementById("dashboardApproved")) document.getElementById("dashboardApproved").innerText = approved;
+  if (document.getElementById("dashboardRejected")) document.getElementById("dashboardRejected").innerText = rejected;
+}
+
+function navigateToTeller(page) {
+  document.querySelectorAll('.sidebar-main .sidebar-btn, .sidebar-more .sidebar-btn').forEach(btn => btn.classList.remove('active'));
+  const selectedButton = Array.from(document.querySelectorAll('.sidebar-main .sidebar-btn, .sidebar-more .sidebar-btn'))
+    .find(btn => btn.getAttribute('onclick')?.includes(`navigateToTeller('${page}')`));
+  if (selectedButton) selectedButton.classList.add('active');
+
+  const mainHeader = document.querySelector('.main-header');
+  if (mainHeader) {
+    const headerContent = mainHeader.querySelector('.header-content');
+    const headerActions = mainHeader.querySelector('.header-actions');
+
+    if (page === 'entry') {
+      if (headerContent) headerContent.innerHTML = '<h1>Claim Encoding</h1><p class="subtitle">Customer Relations Specialist Portal - Encode claim requests and upload supporting documents</p>';
+      if (headerActions) headerActions.innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button><button class="btn" onclick="alert(\'Export feature not configured yet\')">Export</button><button class="btn blue" onclick="openRequestModal()">New Claim Request</button>';
+    } else if (page === 'submissions') {
+      if (headerContent) headerContent.innerHTML = '<h1>My Submitted Claims</h1><p class="subtitle">Customer Relations Specialist Portal - Monitor encoded claims</p>';
+      if (headerActions) headerActions.innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button><button class="btn blue" onclick="openRequestModal()">New Claim</button>';
+    } else if (page === 'history') {
+      if (headerContent) headerContent.innerHTML = '<h1>Claim History</h1><p class="subtitle">Customer Relations Specialist Portal - Complete claim workflow history</p>';
+      if (headerActions) headerActions.innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button>';
+    } else if (page === 'notifications') {
+      if (headerContent) headerContent.innerHTML = '<h1>Notifications</h1><p class="subtitle">Customer Relations Specialist Portal - Claim updates and alerts</p>';
+      if (headerActions) headerActions.innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button>';
+    }
+  }
+
+  const entryView = document.getElementById('entryView');
+  const submissionsView = document.getElementById('submissionsView');
+  const historyView = document.getElementById('historyView');
+  const notificationsView = document.getElementById('notificationsView');
+
+  if (entryView) entryView.style.display = (page === 'entry') ? 'block' : 'none';
+  if (submissionsView) submissionsView.style.display = (page === 'submissions') ? 'block' : 'none';
+  if (historyView) historyView.style.display = (page === 'history') ? 'block' : 'none';
+  if (notificationsView) notificationsView.style.display = (page === 'notifications') ? 'block' : 'none';
+
+  if (page === 'submissions') loadTellerSubmissions();
+  else if (page === 'history') loadTellerHistory();
+}
+
+function navigateToBranch(page) {
+  document.querySelectorAll('.sidebar-main .sidebar-btn, .sidebar-more .sidebar-btn').forEach(btn => btn.classList.remove('active'));
+  const selectedButton = Array.from(document.querySelectorAll('.sidebar-main .sidebar-btn, .sidebar-more .sidebar-btn'))
+    .find(btn => btn.getAttribute('onclick')?.includes(`navigateToBranch('${page}')`));
+  if (selectedButton) selectedButton.classList.add('active');
+
+  const headerTitle = document.querySelector('.main-header h1');
+  const subtitle = document.querySelector('.main-header .subtitle');
+  const headerActions = document.querySelector('.main-header .header-actions');
+
+  if (page === 'review') {
+    if (headerTitle) headerTitle.innerText = 'Claims Verification';
+    if (subtitle) subtitle.innerText = 'Verify claim requests encoded by Customer Relations Specialists';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button>';
+    loadBranchTable();
+    loadBranchCounts();
+  } else if (page === 'dashboard') {
+    if (headerTitle) headerTitle.innerText = 'Membership Verification Dashboard';
+    if (subtitle) subtitle.innerText = 'Monitor branch claim verification volume and status';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button>';
+    loadBranchCounts();
+  } else if (page === 'submitted') {
+    if (headerTitle) headerTitle.innerText = 'Verified Claims';
+    if (subtitle) subtitle.innerText = 'Claims verified by MRD and sent onward in the workflow';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button>';
+    loadBranchSubmitted();
+  } else if (page === 'notifications') {
+    if (headerTitle) headerTitle.innerText = 'Notifications';
+    if (subtitle) subtitle.innerText = 'Membership verification alerts and updates';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button>';
+  } else if (page === 'settings') {
+    if (headerTitle) headerTitle.innerText = 'Settings';
+    if (subtitle) subtitle.innerText = 'Membership verification preferences and account settings';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button>';
+  }
+
+  const reviewView = document.getElementById('reviewView');
+  const dashboardView = document.getElementById('dashboardView');
+  const submittedView = document.getElementById('submittedView');
+  const notificationsView = document.getElementById('notificationsView');
+  const settingsView = document.getElementById('settingsView');
+
+  if (reviewView) reviewView.style.display = (page === 'review') ? 'block' : 'none';
+  if (dashboardView) dashboardView.style.display = (page === 'dashboard') ? 'block' : 'none';
+  if (submittedView) submittedView.style.display = (page === 'submitted') ? 'block' : 'none';
+  if (notificationsView) notificationsView.style.display = (page === 'notifications') ? 'block' : 'none';
+  if (settingsView) settingsView.style.display = (page === 'settings') ? 'block' : 'none';
+}
+
+function navigateToFinance(page) {
+  document.querySelectorAll('.sidebar-main .sidebar-btn').forEach(btn => btn.classList.remove('active'));
+  const selectedButton = Array.from(document.querySelectorAll('.sidebar-main .sidebar-btn'))
+    .find(btn => btn.getAttribute('onclick')?.includes(`navigateToFinance('${page}')`));
+  if (selectedButton) selectedButton.classList.add('active');
+
+  const role = getCurrentRole();
+  const isFinanceHead = role === "finance_head";
+  const headerTitle = document.querySelector('.main-header h1');
+  const subtitle = document.querySelector('.main-header .subtitle');
+
+  if (headerTitle && subtitle) {
+    if (page === 'dashboard') {
+      headerTitle.innerText = isFinanceHead ? 'Finance and Accounting Dashboard' : 'Approver Dashboard';
+      subtitle.innerText = isFinanceHead
+        ? 'Monitor finance review volume and forwarded claims'
+        : 'Monitor final claims decisions and pending approvals';
+    } else if (page === 'audit') {
+      headerTitle.innerText = 'Audit Logs';
+      subtitle.innerText = 'Claim activity and workflow history';
+    } else {
+      headerTitle.innerText = isFinanceHead ? 'Finance and Accounting Review' : 'Savings and Credit Head Approval';
+      subtitle.innerText = isFinanceHead
+        ? 'Double-check verified claims and forward complete requests to the Savings and Credit Head'
+        : 'Approve or reject claims forwarded by Finance and Accounting';
+    }
+  }
+
+  const approvalQueue = document.getElementById('approvalQueueView');
+  const dashboard = document.getElementById('dashboardView');
+  const audit = document.getElementById('auditView');
+
+  if (approvalQueue) approvalQueue.style.display = (page === 'approval') ? 'block' : 'none';
+  if (dashboard) dashboard.style.display = (page === 'dashboard') ? 'block' : 'none';
+  if (audit) audit.style.display = (page === 'audit') ? 'block' : 'none';
+
+  if (page === 'approval') loadFinanceTable();
+  else if (page === 'dashboard') loadFinanceDashboard();
+  else if (page === 'audit') loadAuditLogs();
+}
+
+async function loadTellerCounts() {
+  const res = await fetch(API, {
+    method: "POST",
+    body: JSON.stringify({ action: "getRequests" })
+  });
+
+  const data = await res.json();
+  const tellerEmail = localStorage.getItem("user");
+  const tellerFullname = localStorage.getItem("fullname");
+  let total = 0;
+  let pending = 0;
+  let workflow = 0;
+  let approved = 0;
+
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (!Array.isArray(r)) continue;
+    if (r[8] === tellerEmail || r[8] === tellerFullname) {
+      total++;
+      if (r[7] === "Pending") pending++;
+      if (r[7] === "Under Verification" || r[7] === "Under Review" || r[7] === "Forwarded") workflow++;
+      if (r[7] === "Approved") approved++;
+    }
+  }
+
+  if (document.getElementById("countTotal")) document.getElementById("countTotal").innerText = total;
+  if (document.getElementById("countPending")) document.getElementById("countPending").innerText = pending;
+  if (document.getElementById("countReview")) document.getElementById("countReview").innerText = workflow;
+  if (document.getElementById("countApproved")) document.getElementById("countApproved").innerText = approved;
+}
+
+async function printRequest() {
+  const r = allRequests.find(x => Array.isArray(x) && x[0] === window.currentRequestId);
+  if (!r || r[7] !== "Approved") {
+    alert("Only approved claims can be printed.");
+    return;
+  }
+
+  let settings = {};
+  try {
+    const settingsRes = await fetch(API, {
+      method: "POST",
+      body: JSON.stringify({ action: "getSettings" })
+    });
+    const settingsData = await settingsRes.json();
+    settings = settingsData.settings || {};
+  } catch (err) {
+    console.warn("Unable to load print settings:", err);
+  }
+
+  const formatReportDate = value => {
+    if (!value) return "N/A";
+    const raw = String(value);
+    const dateOnly = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (dateOnly) return `${dateOnly[2]}/${dateOnly[3]}/${dateOnly[1]}`;
+
+    const date = new Date(raw);
+    if (Number.isNaN(date.getTime())) return escapeHtml(raw);
+    return date.toLocaleDateString("en-US", {
+      month: "2-digit",
+      day: "2-digit",
+      year: "numeric"
+    });
+  };
+
+  const formatAmountOnly = value => (Number(value) || 0).toLocaleString("en-US", {
+    minimumFractionDigits: 2,
+    maximumFractionDigits: 2
+  });
+
+  const getReportClaimYear = row => getClaimYear(row?.[21] || row?.[11]);
+  const getReportClaimTime = row => {
+    const raw = row?.[21] || row?.[11] || "";
+    const date = raw ? new Date(`${String(raw).slice(0, 10)}T00:00:00`) : new Date(0);
+    return Number.isNaN(date.getTime()) ? 0 : date.getTime();
+  };
+
+  const getReportRequestRows = async () => {
+    try {
+      const requestsRes = await fetch(API, {
+        method: "POST",
+        body: JSON.stringify({ action: "getRequests" })
+      });
+      const requestsData = await requestsRes.json();
+      if (Array.isArray(requestsData)) {
+        allRequests = requestsData;
+        return requestsData;
+      }
+    } catch (err) {
+      console.warn("Unable to load yearly claim records for report:", err);
+    }
+    return Array.isArray(allRequests) ? allRequests : [];
+  };
+
+  const normalizeSegmentation = value => normalizeValue(value).replace(/[^a-z0-9]/g, "");
+  const isSelectedSegmentation = segment =>
+    normalizeSegmentation(r[18]).includes(normalizeSegmentation(segment));
+  const checkbox = segment => `<span class="check-box ${isSelectedSegmentation(segment) ? "checked" : ""}"></span>`;
+
+  const memberName = escapeHtml(String(r[1] || "N/A").toUpperCase());
+  const contactNumber = escapeHtml(r[12] || "N/A");
+  const dateStr = formatReportDate(r[11]);
+  const branchName = escapeHtml((getRequestBranchName(r) || "N/A").toUpperCase());
+  const sex = escapeHtml(r[2] || "");
+  const segmentation = escapeHtml(String(r[18] || "N/A").toUpperCase());
+  const diagnosis = escapeHtml(r[24] || "");
+  const dateAdmitted = formatReportDate(r[21]);
+  const dateDischarged = formatReportDate(r[22]);
+  const payableDays = Number(r[3]) || 0;
+  const dailyRate = Number(r[4]) || 0;
+  const claimableAmount = Number(r[5]) || 0;
+  const headerImageSrc = settings.reportHeaderImage || settings.headerImage || "";
+
+  if ((Number(r[23]) || payableDays) < MIN_ELIGIBLE_CONFINEMENT_DAYS) {
+    alert(`Hospital confinement must be at least ${MIN_ELIGIBLE_CONFINEMENT_DAYS} days to be eligible for a claim.`);
+    return;
+  }
+
+  const reportRows = await getReportRequestRows();
+  const currentClaimYear = getReportClaimYear(r);
+  const currentMemberId = normalizeValue(r[17]);
+  const currentMemberName = normalizeValue(r[1]);
+  const sameMember = row => {
+    if (!Array.isArray(row)) return false;
+    const rowMemberId = normalizeValue(row[17]);
+    return currentMemberId
+      ? rowMemberId === currentMemberId
+      : normalizeValue(row[1]) === currentMemberName;
+  };
+  const eligibleReportClaims = reportRows
+    .slice(1)
+    .filter(row =>
+      Array.isArray(row) &&
+      sameMember(row) &&
+      getReportClaimYear(row) === currentClaimYear &&
+      row[7] === "Approved" &&
+      (Number(row[23]) || Number(row[3]) || 0) >= MIN_ELIGIBLE_CONFINEMENT_DAYS
+    )
+    .sort((a, b) => getReportClaimTime(a) - getReportClaimTime(b));
+
+  const currentRecordIsEligible = !eligibleReportClaims.some(row => row[0] === r[0]);
+  if (currentRecordIsEligible) eligibleReportClaims.push(r);
+  eligibleReportClaims.sort((a, b) => getReportClaimTime(a) - getReportClaimTime(b));
+
+  let reportClaimRecords = eligibleReportClaims.slice(0, MAX_CLAIMS_PER_YEAR);
+  if (!reportClaimRecords.some(row => row[0] === r[0])) {
+    const otherRecords = eligibleReportClaims
+      .filter(row => row[0] !== r[0])
+      .slice(0, MAX_CLAIMS_PER_YEAR - 1);
+    reportClaimRecords = [...otherRecords, r].sort((a, b) => getReportClaimTime(a) - getReportClaimTime(b));
+  }
+
+  const renderRecordClaimRow = (row, index) => {
+    if (!row) return `<tr class="blank-row"><td>${index + 1}.</td><td></td><td></td><td></td></tr>`;
+
+    const recordSegmentation = escapeHtml(String(row[18] || "N/A").toUpperCase());
+    const recordDateAdmitted = formatReportDate(row[21]);
+    const recordDateDischarged = formatReportDate(row[22]);
+    const recordDays = Number(row[3]) || 0;
+    const recordAmount = Number(row[5]) || 0;
+
+    return `
+      <tr class="record-main">
+        <td class="benefit-cell">${index + 1}. ${recordSegmentation}-Hospitalization benefit</td>
+        <td class="record-period">${recordDateAdmitted} TO ${recordDateDischarged}</td>
+        <td class="days-cell">${recordDays}</td>
+        <td class="amount-cell">${formatAmountOnly(recordAmount)}</td>
+      </tr>
+    `;
+  };
+
+  const recordRowsHtml = Array.from({ length: MAX_CLAIMS_PER_YEAR }, (_, index) =>
+    renderRecordClaimRow(reportClaimRecords[index], index)
+  ).join("");
+  const recordTotalDays = reportClaimRecords.reduce((sum, row) => sum + (Number(row[3]) || 0), 0);
+  const recordTotalAmount = reportClaimRecords.reduce((sum, row) => sum + (Number(row[5]) || 0), 0);
+
+  const preparedByText = String(r[8] || settings.tellerName || "Customer Relations Specialist").toUpperCase();
+  const preparedByFontSize = Math.max(
+    6,
+    Math.min(15, 245 / (Math.max(preparedByText.replace(/\s+/g, " ").trim().length, 1) * 0.56))
+  ).toFixed(1);
+  const preparedBy = escapeHtml(preparedByText);
+  const notedBy = escapeHtml(String(r[9] || settings.membershipSpecialistName || settings.branchManagerName || "MRDS").toUpperCase());
+  const reviewedBy = escapeHtml(String(r[15] || settings.financeHeadName || "Finance And Accounting Head").toUpperCase());
+  const approvedBy = escapeHtml(String(r[10] || settings.savingsCreditHeadName || "Savings and Credit Head").toUpperCase());
+  const mrdSignature = settings.membershipSpecialistSignatureData || settings.branchManagerSignatureData || "";
+  const financeHeadSignature = settings.financeHeadSignatureData || "";
+  const savingsCreditHeadSignature = settings.savingsCreditHeadSignatureData || settings.financeManagerSignatureData || "";
+  const signatureImage = (src, alt) => src
+    ? `<img class="sig-image" src="${escapeHtml(src)}" alt="${escapeHtml(alt)}">`
+    : `<div class="sig-space"></div>`;
+
+  const logoHtml = headerImageSrc
+    ? `<img class="coop-logo" src="${escapeHtml(headerImageSrc)}" alt="Cooperative logo">`
+    : `<div class="coop-logo-placeholder"><div class="coop-text">coop</div><div class="coop-tagline">Our future, today.</div></div>`;
+
+  const printWindow = window.open("", "PRINT", "height=900,width=900");
+  if (!printWindow) return;
+
+  printWindow.document.write(`
+    <html>
+    <head>
+      <title>Hospitalization Allowance Claim Form ${escapeHtml(r[0])}</title>
+      <style>
+        @page{size:letter; margin:0.18in 0.16in;}
+        *{box-sizing:border-box;}
+        body{font-family:"Arial Narrow", Arial, sans-serif; color:#000; margin:0; background:#fff;}
+        .page{width:100%; max-width:8.12in; min-height:10.64in; margin:0 auto; padding:0.02in 0.02in 0;}
+        .coop-header{display:flex; justify-content:center; align-items:center; margin:0 0 0.28in;}
+        .logo-wrap{width:100%; text-align:center;}
+        .coop-logo{max-width:5.9in; max-height:1.05in; width:auto; height:auto; object-fit:contain; display:block; margin:0 auto;}
+        .coop-logo-placeholder{width:1.02in; height:1.04in; text-align:center; margin:0 auto;}
+        .coop-text{border:3px solid #1083c7; border-radius:50%; height:0.78in; width:0.9in; color:#f06a22; font-size:30px; line-height:0.74in; font-weight:800;}
+        .coop-tagline{font-size:11px; color:#1b3aa8; font-weight:700; margin-top:4px;}
+        .title-block{text-align:center; margin-bottom:0.17in;}
+        .title-block h1{font-size:20px; margin:0; font-weight:900; letter-spacing:0;}
+        .title-block h2{font-size:15px; margin:2px 0 0; font-weight:800;}
+        table{border-collapse:collapse; width:100%;}
+        .info-table{font-size:15px; line-height:1.05; margin-bottom:0.16in;}
+        .info-table td{border:1px solid #222; padding:4px 8px; vertical-align:top; height:0.22in;}
+        .info-table .info-cell{font-size:15px; font-weight:400;}
+        .info-table .segmentation-cell{font-size:15px; line-height:1.38; padding:3px 8px 6px;}
+        .seg-title{margin-bottom:2px;}
+        .seg-line{display:block; white-space:normal;}
+        .check-box{display:inline-block; width:0.17in; height:0.17in; border:2px solid #111; margin-right:4px; vertical-align:-2px;}
+        .check-box.checked{background:#111; box-shadow:3px 3px 0 #888;}
+        .cause-cell{font-size:15px; height:0.36in;}
+        .cause-note{font-style:italic;}
+        .certification{font-size:15px; margin:0 0 0.38in;}
+        .claimant-signature{display:flex; justify-content:flex-end; margin:0 0 0.08in;}
+        .claimant-line{width:2.1in; border-top:1px solid #111; text-align:center; padding-top:3px; font-size:16px;}
+        .tear-line{border-top:2px dashed #111; margin:0 0 0.06in;}
+        .record-table{font-size:15px; line-height:1.05;}
+        .record-table th,.record-table td{border:1px solid #222; padding:3px 8px; vertical-align:top;}
+        .record-title th{font-size:16px; font-weight:900; text-align:center; padding:2px 8px;}
+        .record-head th{font-size:15px; font-weight:900; text-align:center;}
+        .record-main td{height:auto; white-space:normal; overflow-wrap:break-word;}
+        .blank-row td{height:0.18in;}
+        .benefit-cell{font-weight:400;}
+        .record-period{text-transform:uppercase;}
+        .days-cell{width:0.86in; text-align:center; vertical-align:middle;}
+        .amount-cell{width:0.9in; text-align:right;}
+        .total-label{font-weight:900; text-transform:uppercase;}
+        .total-value{font-weight:900;}
+        .signature-grid{display:grid; grid-template-columns:repeat(3, 1fr); gap:0.28in; margin-top:0.18in;}
+        .sig-block{font-size:15px; min-height:0.78in;}
+        .manual-signature-line{height:0.3in; border-bottom:1px solid #111; margin:0.05in 0.2in 0.04in;}
+        .sig-image{display:block; max-width:1.35in; max-height:0.35in; object-fit:contain; margin:0.03in auto 0.02in;}
+        .sig-space{height:0.4in;}
+        .sig-name{text-align:center; font-size:15px; font-weight:900; margin-top:0.02in;}
+        .prepared-name{white-space:nowrap; line-height:1; overflow:visible;}
+        .sig-role{text-align:center; font-size:15px;}
+        .approved-block{width:2.7in; margin:0.78in auto 0; font-size:15px; text-align:center;}
+        .approved-block .sig-name{margin-top:0.02in;}
+        @media print{
+          body{-webkit-print-color-adjust:exact; print-color-adjust:exact;}
+        }
+      </style>
+    </head>
+    <body>
+      <div class="page">
+        <div class="coop-header">
+          <div class="logo-wrap">${logoHtml}</div>
+        </div>
+
+        <div class="title-block">
+          <h1>HOSPITALIZATION ALLOWANCE CLAIM FORM</h1>
+          <h2>(For Segmentized Members)</h2>
+        </div>
+
+        <table class="info-table">
+          <colgroup>
+            <col style="width:35%;">
+            <col style="width:23%;">
+            <col style="width:42%;">
+          </colgroup>
+          <tr>
+            <td class="info-cell">Name: ${memberName}</td>
+            <td class="info-cell">Contact No: ${contactNumber}</td>
+            <td class="info-cell">Date of Claim: ${dateStr}</td>
+          </tr>
+          <tr>
+            <td class="info-cell">Branch: ${branchName}</td>
+            <td class="info-cell">Sex: ${sex}</td>
+            <td class="info-cell">Status: ${segmentation}</td>
+          </tr>
+          <tr>
+            <td class="segmentation-cell" colspan="3">
+              <div class="seg-title">Segmentation:</div>
+              <span class="seg-line">${checkbox("Silver")}<strong>SILVER</strong>-Hospitalization benefit of <strong>P${formatAmountOnly(settings.silverRate || (isSelectedSegmentation("Silver") ? dailyRate : 300))}</strong> per day maximum of <strong>10 days</strong> for a confinement of at least <strong>3 days</strong> which can be availed twice a year.</span>
+              <span class="seg-line">${checkbox("Gold")}<strong>GOLD</strong>-Hospitalization benefit of <strong>P${formatAmountOnly(settings.goldRate || (isSelectedSegmentation("Gold") ? dailyRate : 400))}</strong> per day maximum of <strong>10 days</strong> for a confinement of at least <strong>3 days</strong> which can be availed twice a year.</span>
+              <span class="seg-line">${checkbox("Diamond")}<strong>DIAMOND</strong>-Hospitalization benefit of <strong>P${formatAmountOnly(settings.diamondRate || (isSelectedSegmentation("Diamond") ? dailyRate : 500))}</strong> per day maximum of <strong>10 days</strong> with hospital confinement of at least <strong>3 days</strong> which can be availed twice a year.</span>
+            </td>
+          </tr>
+          <tr>
+            <td class="cause-cell" colspan="3">Cause of Hospitalization:${diagnosis ? ` <strong>${diagnosis}</strong>` : ""} <span class="cause-note">(Attached a Medical Certificate duly signed by the attending physician or Director of the hospital)</span></td>
+          </tr>
+          <tr>
+            <td>Period of Confinement</td>
+            <td>From: ${dateAdmitted}</td>
+            <td>To: ${dateDischarged}</td>
+          </tr>
+        </table>
+
+        <p class="certification">I hereby certify that the foregoing information is true and correct.</p>
+        <div class="claimant-signature"><div class="claimant-line">Signature of Claimant</div></div>
+        <div class="tear-line"></div>
+
+        <table class="record-table">
+          <colgroup>
+            <col style="width:54%;">
+            <col style="width:25%;">
+            <col style="width:10.5%;">
+            <col style="width:10.5%;">
+          </colgroup>
+          <tr class="record-title"><th colspan="4">RECORD OF CLAIMS</th></tr>
+          <tr class="record-head">
+            <th>Benefits</th>
+            <th>Period of Confinement</th>
+            <th>Days</th>
+            <th>Amount</th>
+          </tr>
+          ${recordRowsHtml}
+          <tr>
+            <td></td>
+            <td class="total-label">TOTAL</td>
+            <td class="days-cell total-value">${recordTotalDays}</td>
+            <td class="amount-cell total-value">${formatAmountOnly(recordTotalAmount)}</td>
+          </tr>
+        </table>
+
+        <div class="signature-grid">
+          <div class="sig-block">
+            <div>Prepared by:</div>
+            <div class="manual-signature-line"></div>
+            <div class="sig-name prepared-name" style="font-size:${preparedByFontSize}px;">${preparedBy}</div>
+            <div class="sig-role">Customer Relations Specialist</div>
+          </div>
+          <div class="sig-block">
+            <div>Noted:</div>
+            ${signatureImage(mrdSignature, "MRDS e-signature")}
+            <div class="sig-name">${notedBy}</div>
+            <div class="sig-role">MRDS</div>
+          </div>
+          <div class="sig-block">
+            <div>Reviewed by:</div>
+            ${signatureImage(financeHeadSignature, "Finance Head e-signature")}
+            <div class="sig-name">${reviewedBy}</div>
+            <div class="sig-role">Finance And Accounting Head</div>
+          </div>
+        </div>
+
+        <div class="approved-block">
+          <div>Approved by:</div>
+          ${signatureImage(savingsCreditHeadSignature, "Savings and Credit Head e-signature")}
+          <div class="sig-name">${approvedBy}</div>
+          <div class="sig-role">Savings and Credit Head</div>
+        </div>
+      </div>
+    </body>
+    </html>
+  `);
+  printWindow.document.close();
+
+  setTimeout(() => {
+    printWindow.focus();
+    printWindow.print();
+    printWindow.close();
+  }, 500);
 }

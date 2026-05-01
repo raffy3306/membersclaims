@@ -20,7 +20,7 @@ if (localStorage.getItem("role") !== "admin") {
   <!-- SIDEBAR -->
   <div class="sidebar">
     <div class="sidebar-header">
-      <h2>WithdrawSys</h2>
+      <h2>ClaimsSys</h2>
     </div>
 
     <div class="sidebar-role">
@@ -94,15 +94,16 @@ if (localStorage.getItem("role") !== "admin") {
       <div class="table-container">
         <div class="table-header">
           <div>
-            <h3>All Withdrawal Requests</h3>
+            <h3>All Claim Requests</h3>
             <p class="table-count" id="tableCount">0 requests listed</p>
           </div>
           <div class="table-controls">
             <input type="text" placeholder="Search member, purpose..." class="search-input" id="adminSearch" oninput="filterAdminTable()">
             <select class="status-filter" id="adminStatusFilter" onchange="filterAdminTable()">
               <option>All Statuses</option>
-              <option value="Pending">Pending</option>
-              <option value="Forwarded">Forwarded</option>
+              <option value="Pending">For Verification</option>
+              <option value="Under Review">For Finance Review</option>
+              <option value="Forwarded">For Approval</option>
               <option value="Approved">Approved</option>
               <option value="Rejected">Rejected</option>
             </select>
@@ -114,11 +115,11 @@ if (localStorage.getItem("role") !== "admin") {
             <tr>
               <th>REQUEST NO.</th>
               <th>MEMBER NAME</th>
-              <th>TOTAL INVESTMENT</th>
-              <th>AMOUNT WITHDRAWN</th>
-              <th>BALANCE</th>
-              <th>PURPOSE</th>
-              <th>BRANCH MANAGER</th>
+              <th>DAYS COMPUTED</th>
+              <th>RATE / DAY</th>
+              <th>CLAIMABLE AMOUNT</th>
+              <th>HOSPITAL</th>
+              <th>VERIFIED BY</th>
               <th>STATUS</th>
               <th>DATE</th>
               <th>ACTIONS</th>
@@ -141,9 +142,10 @@ if (localStorage.getItem("role") !== "admin") {
             <select class="status-filter" id="userRoleFilter" onchange="filterUsersTable()">
               <option value="All Roles">All Roles</option>
               <option value="admin">Admin</option>
-              <option value="branch_manager">Branch Manager</option>
-              <option value="finance_manager">Savings and Credit Head</option>
-              <option value="teller">Teller</option>
+              <option value="crs">Customer Relations Specialist</option>
+              <option value="membership_specialist">MRD Specialist</option>
+              <option value="finance_head">Finance and Accounting Head</option>
+              <option value="savings_credit_head">Savings and Credit Head</option>
             </select>
             <button class="btn blue" onclick="openUserModal()">Add User</button>
           </div>
@@ -167,45 +169,80 @@ if (localStorage.getItem("role") !== "admin") {
     </div>
 
     <div id="settingsSection" style="display: none;">
-      <h3>Signatory Settings</h3>
+      <h3>Member Segmentation Rates</h3>
       <div class="card" style="padding: 20px;">
-        <label for="tellerSignatory">Teller Name</label>
-        <input id="tellerSignatory" placeholder="Enter teller signatory name" class="form-control">
+        <div class="segmentation-rates-container">
+          <div class="rate-input-group">
+            <label for="silverRate">Silver Segmentation (Daily)</label>
+            <div class="input-group">
+              <input id="silverRate" type="number" placeholder="300" class="form-control" min="0" step="0.01">
+              <span class="currency-symbol">/Day</span>
+            </div>
+          </div>
 
-        <label for="branchManagerSignatory">Branch Manager Name</label>
-        <input id="branchManagerSignatory" placeholder="Enter branch manager signatory name" class="form-control">
+          <div class="rate-input-group">
+            <label for="goldRate">Gold Segmentation (Daily)</label>
+            <div class="input-group">
+              <input id="goldRate" type="number" placeholder="400" class="form-control" min="0" step="0.01">
+              <span class="currency-symbol">/Day</span>
+            </div>
+          </div>
 
-        <label for="financeManagerSignatory">Savings and Credit Head Name</label>
-        <input id="financeManagerSignatory" placeholder="Enter finance manager signatory name" class="form-control">
+          <div class="rate-input-group">
+            <label for="diamondRate">Diamond Segmentation (Daily)</label>
+            <div class="input-group">
+              <input id="diamondRate" type="number" placeholder="500" class="form-control" min="0" step="0.01">
+              <span class="currency-symbol">/Day</span>
+            </div>
+          </div>
+        </div>
+
+        <button class="btn blue" onclick="saveSegmentationRates()" style="margin-top: 20px;">Save Rates</button>
+      </div>
+
+      <h3 style="margin-top: 30px;">Signatory Settings</h3>
+      <div class="card" style="padding: 20px;">
+        <label for="tellerSignatory">Customer Relations Specialist Name</label>
+        <input id="tellerSignatory" placeholder="Enter CRS signatory name" class="form-control">
+
+        <label for="branchManagerSignatory">MRD Specialist Name</label>
+        <input id="branchManagerSignatory" placeholder="Enter MRD specialist signatory name" class="form-control">
+
+        <label for="financeHeadSignatory">Finance and Accounting Head Name</label>
+        <input id="financeHeadSignatory" placeholder="Enter Finance and Accounting Head signatory name" class="form-control">
+
+        <label for="savingsCreditHeadSignatory">Savings and Credit Head Name</label>
+        <input id="savingsCreditHeadSignatory" placeholder="Enter Savings and Credit Head signatory name" class="form-control">
 
         <button class="btn blue" onclick="saveSignatorySettings()">Save Settings</button>
       </div>
 
       <div class="card" style="padding: 20px; margin-top: 20px;">
         <h4>Upload Electronic Signatures</h4>
+        <p style="margin: 0 0 16px; color: #666; font-size: 13px;">CRS signs the printed report manually. Upload e-signatures only for the approving offices below.</p>
 
         <div class="signature-upload-row">
-          <label for="tellerSignatureFile">Teller Signature</label>
-          <input id="tellerSignatureFile" type="file" accept="image/*">
-          <button class="btn blue" onclick="uploadSignature('teller')">Upload Signature</button>
-          <button class="btn red" onclick="clearSignature('teller')">Clear Signature</button>
-          <img id="tellerSignaturePreview" class="signature-preview" alt="Teller Signature Preview">
+          <label for="mrdSignatureFile">MRDS Signature</label>
+          <input id="mrdSignatureFile" type="file" accept="image/*">
+          <button class="btn blue" onclick="uploadSignature('membershipSpecialist')">Upload Signature</button>
+          <button class="btn red" onclick="clearSignature('membershipSpecialist')">Clear Signature</button>
+          <img id="mrdSignaturePreview" class="signature-preview" alt="MRDS Signature Preview">
         </div>
 
         <div class="signature-upload-row">
-          <label for="branchSignatureFile">Branch Manager Signature</label>
-          <input id="branchSignatureFile" type="file" accept="image/*">
-          <button class="btn blue" onclick="uploadSignature('branchManager')">Upload Signature</button>
-          <button class="btn red" onclick="clearSignature('branchManager')">Clear Signature</button>
-          <img id="branchSignaturePreview" class="signature-preview" alt="Branch Manager Signature Preview">
+          <label for="financeHeadSignatureFile">Finance and Accounting Head Signature</label>
+          <input id="financeHeadSignatureFile" type="file" accept="image/*">
+          <button class="btn blue" onclick="uploadSignature('financeHead')">Upload Signature</button>
+          <button class="btn red" onclick="clearSignature('financeHead')">Clear Signature</button>
+          <img id="financeHeadSignaturePreview" class="signature-preview" alt="Finance Head Signature Preview">
         </div>
 
         <div class="signature-upload-row">
-          <label for="financeSignatureFile">Savings and Credit Head Signature</label>
-          <input id="financeSignatureFile" type="file" accept="image/*">
-          <button class="btn blue" onclick="uploadSignature('financeManager')">Upload Signature</button>
-          <button class="btn red" onclick="clearSignature('financeManager')">Clear Signature</button>
-          <img id="financeSignaturePreview" class="signature-preview" alt="Savings and Credit Head Signature Preview">
+          <label for="savingsCreditHeadSignatureFile">Savings and Credit Head Signature</label>
+          <input id="savingsCreditHeadSignatureFile" type="file" accept="image/*">
+          <button class="btn blue" onclick="uploadSignature('savingsCreditHead')">Upload Signature</button>
+          <button class="btn red" onclick="clearSignature('savingsCreditHead')">Clear Signature</button>
+          <img id="savingsCreditHeadSignaturePreview" class="signature-preview" alt="Savings and Credit Head Signature Preview">
         </div>
       </div>
 
@@ -274,9 +311,10 @@ if (localStorage.getItem("role") !== "admin") {
         <label for="userRoleInput">Role</label>
         <select id="userRoleInput" class="form-control">
           <option value="admin">Admin</option>
-          <option value="branch_manager">Branch Manager</option>
-          <option value="finance_manager">Savings and Credit Head</option>
-          <option value="teller">Teller</option>
+          <option value="crs">Customer Relations Specialist</option>
+          <option value="membership_specialist">MRD Specialist</option>
+          <option value="finance_head">Finance and Accounting Head</option>
+          <option value="savings_credit_head">Savings and Credit Head</option>
         </select>
       </div>
 

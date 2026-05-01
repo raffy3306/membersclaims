@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Investment Withdrawal System</title>
+  <title>Members Claims System</title>
   <link rel="stylesheet" href="style.css">
 </head>
 
@@ -11,9 +11,9 @@
 <div class="login-container">
   <div class="login-card">
 
-    <h2>Investment Withdraw System</h2>
+    <h2>Members Claims System</h2>
     <p class="subtitle">Please login to continue.</p>
-    <p class="login-note">Use your admin credentials to access the Admin Dashboard.</p>
+    <p class="login-note">Use your assigned account credentials to access your dashboard.</p>
 
     <label>Email Address</label>
     <input id="email" placeholder="you@email.com">
@@ -26,7 +26,7 @@
       <a href="#" onclick="openForgotPasswordModal(event)">Forgot password?</a>
     </div>
 
-    <button class="btn blue" onclick="login()">Sign In →</button>
+    <button class="btn blue" id="loginButton" onclick="login()">Sign In</button>
 
   </div>
 </div>
@@ -75,7 +75,7 @@
         <input id="forgotPasswordEmail" class="form-control" type="email" placeholder="you@email.com">
       </div>
       <p style="margin: 0; font-size: 13px; color: #6b7280;">
-        Enter your account email and we will send password recovery instructions.
+        Enter your account email and ask an admin to set a temporary password if your account is found.
       </p>
     </div>
     <div class="modal-footer">

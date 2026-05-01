@@ -368,40 +368,44 @@ function updateUser(data) {
 }
 
 function createRequest(data) {
-  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("Withdrawals");
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("Claims");
 
-  const balance = data.totalInvestment - data.amount;
-
-  if (balance < 3000) {
-    return {
-      success: false,
-      message: "Remaining balance cannot go below ₱3,000"
-    };
-  }
+  const claimId = data.request_id || generateID();
 
   sheet.appendRow([
-    generateID(),        // WithdrawalID
-    data.memberName,     // MemberName
-    data.totalInvestment,// TotalInvestment
-    data.amount,         // AmountWithdrawn
-    balance,             // Balance
-    data.purpose,        // Purpose
-    "Pending",         // Status
-    data.tellerName || data.tellerEmail,   // ProcessedBy (fullname, fallback to email)
-    "",                 // CheckedBy
-    "",                 // ApprovedBy
-    data.date || data.dateStamp || new Date().toLocaleDateString(),  // Date (legacy DateStamp fallback) in column K
-    data.contactNumber,  // ContactNumber (column L = 11)
-    data.tellerBranchId || "",  // TellerBranchId (column M = 12)
-    ""  // Notes (column N = 13)
+    claimId,                        // ClaimID (0)
+    data.memberName || "",          // MemberName (1)
+    data.gender || "",              // Gender (2)
+    data.daysConfined || 0,         // DaysComputed (3)
+    data.dailyRate || 0,            // DailyRate (4)
+    data.claimableAmount || 0,      // ClaimableAmount (5)
+    data.hospitalName || "",        // Hospital (6)
+    "Pending",                      // Status (7)
+    data.tellerName || data.tellerEmail || "", // EncodedBy (8)
+    "",                             // VerifiedBy (9)
+    "",                             // ApprovedBy (10)
+    data.dateStamp || new Date().toLocaleString(), // DateStamp (11)
+    data.contactNumber || "",       // ContactNumber (12)
+    data.tellerBranchId || data.branchid || "", // BranchId (13)
+    "",                             // Notes (14)
+    "",                             // FinanceCheckedBy (15)
+    "",                             // Attachments (16)
+    data.memberID || "",            // MemberID (17)
+    data.segmentation || "",        // Segmentation (18)
+    data.branchName || data.branch || "", // Branch (19)
+    data.hospitalID || "",          // HospitalID (20)
+    data.dateAdmitted || "",        // DateAdmitted (21)
+    data.dateDischarged || "",      // DateDischarged (22)
+    data.actualDaysConfined || 0,   // ActualDaysConfined (23)
+    data.diagnosis || ""            // Diagnosis (24)
   ]);
 
-  return { success: true };
+  return { success: true, request_id: claimId };
 }
 
 // 📥 GET REQUESTS
 function getRequests(data) {
-  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("Withdrawals");
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("Claims");
   const rows = sheet.getDataRange().getValues();
 
   return rows;
@@ -409,79 +413,84 @@ function getRequests(data) {
 
 // 🔄 UPDATE STATUS
 function updateStatus(data) {
-  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("Withdrawals");
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("Hospitalization Claims");
   const rows = sheet.getDataRange().getValues();
 
   for (let i = 1; i < rows.length; i++) {
     if (rows[i][0] === data.request_id) {
+      // Update Status (column 8 = index 7)
+      sheet.getRange(i + 1, 8).setValue(data.status);
 
-      sheet.getRange(i + 1, 7).setValue(data.status); // Status (column 7)
-
+      // Update based on role
       if (data.role === "branch_manager") {
-        sheet.getRange(i + 1, 9).setValue(data.branchManagerName || data.branchManagerEmail); // CheckedBy (column 9) - fullname, fallback to email
-      }
-
-      if (data.role === "finance_manager") {
+        // Branch Manager sets VerifiedBy (column 10 = index 9)
+        sheet.getRange(i + 1, 10).setValue(data.branchManagerName || data.branchManagerEmail);
+      } else if (data.role === "membership_specialist") {
+        // Membership Specialist sets VerifiedBy (column 10 = index 9)
+        sheet.getRange(i + 1, 10).setValue(data.financeManagerName || data.financeManagerEmail);
+      } else if (data.role === "finance_head") {
+        // Finance Head sets FinanceCheckedBy (column 16 = index 15)
+        sheet.getRange(i + 1, 16).setValue(data.financeManagerName || data.financeManagerEmail);
+      } else if (data.role === "savings_credit_head") {
+        // Savings & Credit Head sets ApprovedBy (column 11 = index 10)
         if (data.status === "Approved" || data.status === "Rejected") {
-          sheet.getRange(i + 1, 10).setValue(data.financeManagerName || data.financeManagerEmail); // ApprovedBy (column 10)
+          sheet.getRange(i + 1, 11).setValue(data.financeManagerName || data.financeManagerEmail);
         } else {
-          sheet.getRange(i + 1, 10).setValue(""); // Clear ApprovedBy when sent back for further review
+          // Clear ApprovedBy when not final status
+          sheet.getRange(i + 1, 11).setValue("");
         }
       }
 
-      // Update DateStamp column (column K = 11)
-      sheet.getRange(i + 1, 11).setValue(data.dateStamp || new Date().toLocaleString());
+      // Update DateStamp (column 12 = index 11)
+      sheet.getRange(i + 1, 12).setValue(data.dateStamp || new Date().toLocaleString());
 
-      // Save branch manager notes in column N when provided.
+      // Update Notes (column 15 = index 14)
       if (typeof data.notes !== "undefined") {
-        sheet.getRange(i + 1, 14).setValue(data.notes || "");
+        sheet.getRange(i + 1, 15).setValue(data.notes || "");
       }
-
-      break;
-    }
-  }
-
-  return { success: true };
-}
-
-function editRequest(data) {
-  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("Withdrawals");
-  const rows = sheet.getDataRange().getValues();
-
-  const totalInvestment = Number(data.totalInvestment);
-  const amount = Number(data.amount);
-  const balance = totalInvestment - amount;
-
-  if (balance < 3000) {
-    return {
-      success: false,
-      message: "Remaining balance cannot go below â‚±3,000"
-    };
-  }
-
-  for (let i = 1; i < rows.length; i++) {
-    if (rows[i][0] === data.request_id) {
-      if (String(rows[i][6] || "").trim() !== "Returned") {
-        return { success: false, message: "Only returned requests can be edited." };
-      }
-
-      sheet.getRange(i + 1, 2).setValue(data.memberName || ""); // MemberName
-      sheet.getRange(i + 1, 3).setValue(totalInvestment); // TotalInvestment
-      sheet.getRange(i + 1, 4).setValue(amount); // AmountWithdrawn
-      sheet.getRange(i + 1, 5).setValue(balance); // Balance
-      sheet.getRange(i + 1, 6).setValue(data.purpose || ""); // Purpose
-      sheet.getRange(i + 1, 7).setValue("Pending"); // Status
-      sheet.getRange(i + 1, 9).setValue(""); // CheckedBy
-      sheet.getRange(i + 1, 10).setValue(""); // ApprovedBy
-      sheet.getRange(i + 1, 11).setValue(data.date || data.dateStamp || new Date().toLocaleString()); // DateStamp
-      sheet.getRange(i + 1, 12).setValue(data.contactNumber || ""); // ContactNumber
-      sheet.getRange(i + 1, 14).setValue(""); // Notes
 
       return { success: true };
     }
   }
 
-  return { success: false, message: "Request not found." };
+  return { success: false, message: "Claim not found." };
+}
+
+function editRequest(data) {
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("Claims");
+  const rows = sheet.getDataRange().getValues();
+
+  for (let i = 1; i < rows.length; i++) {
+    if (rows[i][0] === data.request_id) {
+      // Check status is "Returned" (column 8 = index 7)
+      if (String(rows[i][7] || "").trim() !== "Returned") {
+        return { success: false, message: "Only returned claims can be edited." };
+      }
+
+      // Update claim information
+      sheet.getRange(i + 1, 2).setValue(data.memberName || ""); // MemberName (column 2 = index 1)
+      sheet.getRange(i + 1, 3).setValue(data.gender || ""); // Gender (column 3 = index 2)
+      sheet.getRange(i + 1, 4).setValue(data.daysConfined || 0); // DaysComputed (column 4 = index 3)
+      sheet.getRange(i + 1, 5).setValue(data.dailyRate || 0); // DailyRate (column 5 = index 4)
+      sheet.getRange(i + 1, 6).setValue(data.claimableAmount || 0); // ClaimableAmount (column 6 = index 5)
+      sheet.getRange(i + 1, 7).setValue(data.hospitalName || ""); // Hospital (column 7 = index 6)
+      sheet.getRange(i + 1, 8).setValue("Pending"); // Status (column 8 = index 7)
+      sheet.getRange(i + 1, 10).setValue(""); // VerifiedBy (column 10 = index 9)
+      sheet.getRange(i + 1, 11).setValue(""); // ApprovedBy (column 11 = index 10)
+      sheet.getRange(i + 1, 12).setValue(data.dateStamp || new Date().toLocaleString()); // DateStamp (column 12 = index 11)
+      sheet.getRange(i + 1, 13).setValue(data.contactNumber || ""); // ContactNumber (column 13 = index 12)
+      sheet.getRange(i + 1, 15).setValue(""); // Notes (column 15 = index 14)
+      sheet.getRange(i + 1, 16).setValue(""); // FinanceCheckedBy (column 16 = index 15)
+      sheet.getRange(i + 1, 22).setValue(data.dateAdmitted || ""); // DateAdmitted (column 22 = index 21)
+      sheet.getRange(i + 1, 23).setValue(data.dateDischarged || ""); // DateDischarged (column 23 = index 22)
+      sheet.getRange(i + 1, 24).setValue(data.actualDaysConfined || 0); // ActualDaysConfined (column 24 = index 23)
+      sheet.getRange(i + 1, 25).setValue(data.diagnosis || ""); // Diagnosis (column 25 = index 24)
+
+      return { success: true };
+    }
+  }
+
+  return { success: false, message: "Claim not found." };
 }
 
 // 🔢 Generate ID
@@ -490,7 +499,7 @@ function generateID() {
 }
 
 function getDashboardCounts() {
-  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("Withdrawals");
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("Claims");
   const rows = sheet.getDataRange().getValues();
 
   let awaiting = 0;
@@ -505,17 +514,17 @@ function getDashboardCounts() {
   const dateStampIndex = headers.findIndex(h => h === "DateStamp");
 
   for (let i = 1; i < rows.length; i++) {
-    const status = rows[i][6]; // Status column (index 6)
-    const date = dateStampIndex >= 0 ? new Date(rows[i][dateStampIndex]) : new Date(rows[i][10]);
+    const status = rows[i][7]; // Status column (index 7)
+    const date = dateStampIndex >= 0 ? new Date(rows[i][dateStampIndex]) : new Date(rows[i][11]);
 
-    if (status === "Pending" || status === "Forwarded") awaiting++;
+    if (status === "Pending" || status === "Forwarded" || status === "Under Verification" || status === "Under Review") awaiting++;
 
     if (date.getMonth() === currentMonth && date.getFullYear() === currentYear) {
       if (status === "Approved") approved++;
       if (status === "Rejected") rejected++;
     }
 
-    if (status === "Under Review") review++;
+    if (status === "Under Review" || status === "Under Verification") review++;
   }
 
   return {
