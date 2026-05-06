@@ -2957,8 +2957,11 @@ function loadBranchSubmitted() {
 
 function navigateToFinance(page) {
   // Update sidebar active state
-  document.querySelectorAll('.sidebar-main .sidebar-btn').forEach(btn => btn.classList.remove('active'));
-  const selectedButton = Array.from(document.querySelectorAll('.sidebar-main .sidebar-btn'))
+  const financeSidebarButtons = document.querySelectorAll(
+    '.sidebar-main .sidebar-btn, .sidebar-admin .sidebar-btn, .sidebar-bottom .sidebar-btn'
+  );
+  financeSidebarButtons.forEach(btn => btn.classList.remove('active'));
+  const selectedButton = Array.from(financeSidebarButtons)
     .find(btn => btn.getAttribute('onclick')?.includes(`navigateToFinance('${page}')`));
   if (selectedButton) selectedButton.classList.add('active');
 
@@ -3026,28 +3029,147 @@ async function loadFinanceDashboard() {
 }
 
 function loadAuditLogs() {
-  // Simulated audit logs - in production, this would come from the API
-  const auditLogs = [
-    { requestNo: "REQ-1776511022614", action: "Forwarded", user: "ai.bmpcmarketing@gmail.com", status: "Forwarded", timestamp: "4/18/2026, 7:17:02 PM" },
-    { requestNo: "REQ-1776511330945", action: "Forwarded", user: "ai.bmpcmarketing@gmail.com", status: "Forwarded", timestamp: "4/18/2026, 7:22:10 PM" },
-    { requestNo: "REQ-1776511547603", action: "Forwarded", user: "ai.bmpcmarketing@gmail.com", status: "Forwarded", timestamp: "4/18/2026, 7:25:47 PM" }
-  ];
+  const auditTable = document.getElementById("auditTable");
+  if (!auditTable) return;
 
-  let html = "";
-  for (const log of auditLogs) {
-    html += `
-      <tr>
-        <td style="padding: 10px; border-bottom: 1px solid #eee;">${log.requestNo}</td>
-        <td style="padding: 10px; border-bottom: 1px solid #eee;">${log.action}</td>
-        <td style="padding: 10px; border-bottom: 1px solid #eee;">${log.user}</td>
-        <td style="padding: 10px; border-bottom: 1px solid #eee;"><span class="${getStatusClass(log.status)}">${log.status}</span></td>
-        <td style="padding: 10px; border-bottom: 1px solid #eee;">${log.timestamp}</td>
-      </tr>
-    `;
+  const role = getCurrentRole();
+  auditTable.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px; color: #999;">Loading audit logs...</td></tr>';
+
+  loadWorkflowRequests()
+    .then(data => {
+      const auditLogs = buildAuditLogs(data, role);
+
+      if (!auditLogs.length) {
+        const emptyMessage = role === "savings_credit_head"
+          ? "No approval audit activity found."
+          : "No audit activity found.";
+        auditTable.innerHTML = `<tr><td colspan="5" style="text-align: center; padding: 20px; color: #999;">${emptyMessage}</td></tr>`;
+        return;
+      }
+
+      auditTable.innerHTML = auditLogs.map(log => `
+        <tr>
+          <td style="padding: 10px; border-bottom: 1px solid #eee;">${escapeHtml(log.requestNo)}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #eee;">${escapeHtml(log.action)}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #eee;">${escapeHtml(log.user || "N/A")}</td>
+          <td style="padding: 10px; border-bottom: 1px solid #eee;"><span class="${getStatusClass(log.status)}">${escapeHtml(getStatusLabel(log.status))}</span></td>
+          <td style="padding: 10px; border-bottom: 1px solid #eee;">${escapeHtml(log.timestamp)}</td>
+        </tr>
+      `).join("");
+    })
+    .catch(err => {
+      console.error("Failed to load audit logs:", err);
+      auditTable.innerHTML = '<tr><td colspan="5" style="text-align: center; padding: 20px; color: #c00;">Failed to load audit logs.</td></tr>';
+    });
+}
+
+function buildAuditLogs(data, role = getCurrentRole()) {
+  if (!Array.isArray(data)) return [];
+
+  const logs = [];
+  const normalizedRole = normalizeRole(role);
+  const approverAuditOnly = normalizedRole === "savings_credit_head";
+
+  for (let i = 1; i < data.length; i++) {
+    const row = data[i];
+    if (!Array.isArray(row) || !row.length) continue;
+
+    const requestNo = row[0] || "";
+    const timestamp = formatAuditTimestamp(row[11]);
+    const sortTime = getAuditSortTime(row[11]);
+
+    if (!approverAuditOnly && row[8]) {
+      logs.push({
+        requestNo,
+        action: "Claim encoded",
+        user: row[8],
+        status: "Pending",
+        timestamp,
+        sortTime
+      });
+    }
+
+    if (!approverAuditOnly && row[9]) {
+      logs.push({
+        requestNo,
+        action: "Verified for finance review",
+        user: row[9],
+        status: "Under Review",
+        timestamp,
+        sortTime
+      });
+    }
+
+    if (row[15]) {
+      logs.push({
+        requestNo,
+        action: approverAuditOnly
+          ? "Forwarded for final decision"
+          : row[7] === "Under Verification"
+            ? "Returned to membership review"
+            : "Reviewed by Finance",
+        user: row[15],
+        status: row[7] === "Under Verification" ? "Under Verification" : "Forwarded",
+        timestamp,
+        sortTime
+      });
+    }
+
+    if (row[10]) {
+      logs.push({
+        requestNo,
+        action: row[7] === "Rejected" ? "Claim rejected" : "Claim approved",
+        user: row[10],
+        status: row[7],
+        timestamp,
+        sortTime
+      });
+    }
+
+    if (approverAuditOnly && row[7] === "Forwarded" && !row[15]) {
+      logs.push({
+        requestNo,
+        action: "Forwarded for final decision",
+        user: "N/A",
+        status: "Forwarded",
+        timestamp,
+        sortTime
+      });
+    }
+
+    if (!approverAuditOnly && !row[8] && !row[9] && !row[15] && !row[10]) {
+      logs.push({
+        requestNo,
+        action: getStatusLabel(row[7] || "Pending"),
+        user: "N/A",
+        status: row[7] || "Pending",
+        timestamp,
+        sortTime
+      });
+    }
   }
 
-  const auditTable = document.getElementById("auditTable");
-  if (auditTable) auditTable.innerHTML = html;
+  return logs.sort((a, b) => b.sortTime - a.sortTime);
+}
+
+function formatAuditTimestamp(value) {
+  if (!value) return "N/A";
+
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return String(value);
+
+  return date.toLocaleString("en-US", {
+    year: "numeric",
+    month: "short",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+}
+
+function getAuditSortTime(value) {
+  const date = new Date(value);
+  return Number.isNaN(date.getTime()) ? 0 : date.getTime();
 }
 
 function exportData() {
@@ -4379,8 +4501,11 @@ function navigateToBranch(page) {
 }
 
 function navigateToFinance(page) {
-  document.querySelectorAll('.sidebar-main .sidebar-btn').forEach(btn => btn.classList.remove('active'));
-  const selectedButton = Array.from(document.querySelectorAll('.sidebar-main .sidebar-btn'))
+  const financeSidebarButtons = document.querySelectorAll(
+    '.sidebar-main .sidebar-btn, .sidebar-admin .sidebar-btn, .sidebar-bottom .sidebar-btn'
+  );
+  financeSidebarButtons.forEach(btn => btn.classList.remove('active'));
+  const selectedButton = Array.from(financeSidebarButtons)
     .find(btn => btn.getAttribute('onclick')?.includes(`navigateToFinance('${page}')`));
   if (selectedButton) selectedButton.classList.add('active');
 
