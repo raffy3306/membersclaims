@@ -1,4 +1,4 @@
-const API = "https://script.google.com/macros/s/AKfycbxU015eGubQU_0JCWqOmIf2Khm2Tjn8Gi4fE5RxB6u9rczuiCK_t7jjv6v47gLd9Xz0Eg/exec";
+const API = "https://script.google.com/macros/s/AKfycbyGK390l-NGN3h8z_DpjetSU9NW2meIXSUUxRPMxENBunfCt6msVCsilw04ApC9eGhlfg/exec";
 // Apps Script web apps reject CORS preflight OPTIONS requests, so POST JSON as plain text.
 const APPS_SCRIPT_JSON_HEADERS = { "Content-Type": "text/plain;charset=utf-8" };
 
@@ -7,6 +7,7 @@ const SUPABASE_TABLES = {
   hospitals: "hospitals",
   claims: "hospitalizationclaims",
   hospitalizationclaims: "hospitalizationclaims",
+  karamayClaims: "karamayclaims",
   hcattachments: "hcattachments",
   settings: "app_settings",
   members: "members",
@@ -91,6 +92,26 @@ const REQUEST_HEADERS = [
   "DateDischarged",
   "ActualDaysConfined",
   "Diagnosis"
+];
+
+const KARAMAY_CLAIM_HEADERS = [
+  "ClaimID",
+  "MemberName",
+  "MemberBranchId",
+  "MemberAddress",
+  "DateOfDeath",
+  "BeneficiaryName",
+  "Relationship",
+  "BeneficiaryAddress",
+  "ContactNumber",
+  "ModeOfRelease",
+  "Status",
+  "EncodedBy",
+  "DateStamp",
+  "BranchManagerReviewedBy",
+  "SavingsCreditApprovedBy",
+  "Notes",
+  "Attachments"
 ];
 
 function getSupabaseConfig() {
@@ -242,15 +263,23 @@ function pickField(source, names, fallback = "") {
 }
 
 function normalizeAttachments(value) {
-  if (Array.isArray(value)) return value;
   if (!value) return [];
+  if (Array.isArray(value)) return value;
+
+  const raw = typeof value === "string" ? value : JSON.stringify(value);
 
   try {
-    const parsed = typeof value === "string" ? JSON.parse(value) : value;
-    return Array.isArray(parsed) ? parsed : [];
+    const parsed = JSON.parse(raw);
+    if (Array.isArray(parsed)) return parsed;
+    if (typeof parsed === "string") {
+      const nested = JSON.parse(parsed);
+      return Array.isArray(nested) ? nested : [];
+    }
   } catch (err) {
-    return [];
+    // Nested or invalid JSON may still occur; continue below.
   }
+
+  return [];
 }
 
 function readFileAsDataUrl(file) {
@@ -299,6 +328,10 @@ function calculateHospitalDays(dateAdmitted, dateDischarged) {
 function getClaimYear(dateAdmitted) {
   const date = dateAdmitted ? new Date(`${dateAdmitted}T00:00:00`) : new Date();
   return Number.isNaN(date.getTime()) ? new Date().getFullYear() : date.getFullYear();
+}
+
+function generateID(prefix = "REQ") {
+  return `${prefix}-${Date.now()}`;
 }
 
 async function supabaseCountYearlyClaims(memberId, claimYear, excludedClaimId = "") {
@@ -522,6 +555,90 @@ async function supabaseGetRequests() {
   ];
 }
 
+function karamayClaimToLegacyRow(claim) {
+  return [
+    pickField(claim, ["claim_id", "id"], ""),
+    pickField(claim, ["member_name"], ""),
+    pickField(claim, ["member_branch_id", "branch_id"], ""),
+    pickField(claim, ["member_address"], ""),
+    pickField(claim, ["date_of_death"], ""),
+    pickField(claim, ["beneficiary_name", "requestor_name"], ""),
+    pickField(claim, ["relationship"], ""),
+    pickField(claim, ["beneficiary_address", "requestor_address"], ""),
+    pickField(claim, ["contact_number"], ""),
+    pickField(claim, ["mode_of_release", "modeOfRelease", "ModeOfRelease"], "Actual Delivery (Bouquet and Cash)"),
+    pickField(claim, ["claim_status", "status"], "Pending"),
+    pickField(claim, ["encoded_by", "created_by"], ""),
+    pickField(claim, ["date_filed", "created_at", "last_updated"], ""),
+    pickField(claim, ["branch_manager_reviewed_by"], ""),
+    pickField(claim, ["savings_credit_approved_by", "approved_by"], ""),
+    pickField(claim, ["remarks", "notes"], ""),
+    normalizeAttachments(pickField(claim, ["attachments"], []))
+  ];
+}
+
+async function supabaseGetKaramayClaims() {
+  const db = getSupabaseClient();
+  const { data, error } = await db
+    .from(SUPABASE_TABLES.karamayClaims)
+    .select("*")
+    .order("date_filed", { ascending: false });
+
+  if (error) throw error;
+
+  return [
+    KARAMAY_CLAIM_HEADERS,
+    ...(data || []).map(karamayClaimToLegacyRow)
+  ];
+}
+
+async function supabaseCreateKaramayClaim(data) {
+  const db = getSupabaseClient();
+  const now = new Date().toISOString();
+  const request = {
+    claim_id: data.request_id || generateID("KRM"),
+    date_filed: now,
+    member_name: data.memberName || "",
+    member_branch_id: data.memberBranchId || data.branchid || "",
+    member_address: data.memberAddress || "",
+    date_of_death: data.dateOfDeath || null,
+    beneficiary_name: data.beneficiaryName || "",
+    relationship: data.relationship || "",
+    beneficiary_address: data.beneficiaryAddress || "",
+    contact_number: data.contactNumber || "",
+    mode_of_release: data.modeOfRelease || "Actual Delivery (Bouquet and Cash)",
+    claim_status: "Pending",
+    status: "Pending",
+    encoded_by: data.tellerName || data.tellerEmail || "",
+    branch_manager_reviewed_by: "",
+    savings_credit_approved_by: "",
+    remarks: "",
+    attachments: data.attachments || [],
+    last_updated: now,
+    last_updated_by: data.tellerEmail || data.tellerName || ""
+  };
+
+  if (!request.member_name || !request.member_branch_id || !request.member_address || !request.date_of_death) {
+    return { success: false, message: "Please complete the deceased member information." };
+  }
+
+  if (!request.beneficiary_name || !request.relationship || !request.beneficiary_address || !request.contact_number) {
+    return { success: false, message: "Please complete the beneficiary/requestor information." };
+  }
+
+  if (!Array.isArray(request.attachments) || request.attachments.length < 2) {
+    return { success: false, message: "Please upload the death certificate and valid ID attachments." };
+  }
+
+  const { error } = await db
+    .from(SUPABASE_TABLES.karamayClaims)
+    .insert(request);
+
+  if (error) throw error;
+
+  return { success: true, request_id: request.claim_id };
+}
+
 async function supabaseCreateRequest(data) {
   const db = getSupabaseClient();
   const days = calculateHospitalDays(data.dateAdmitted, data.dateDischarged);
@@ -693,6 +810,9 @@ async function supabaseEditRequest(data) {
 async function supabaseUpdateStatus(data) {
   const db = getSupabaseClient();
   const role = normalizeRole(data.role);
+  const isKaramayClaim = String(data.request_id || "").startsWith("KRM");
+  const tableName = isKaramayClaim ? SUPABASE_TABLES.karamayClaims : SUPABASE_TABLES.claims;
+
   const updates = {
     claim_status: data.status,
     status: data.status,
@@ -700,32 +820,48 @@ async function supabaseUpdateStatus(data) {
     last_updated_by: data.financeManagerEmail || data.branchManagerEmail || data.tellerEmail || ""
   };
 
-  if (role === "branch_manager") {
-    updates.checked_by = data.branchManagerName || data.branchManagerEmail || "";
-    updates.verified_by = data.branchManagerName || data.branchManagerEmail || "";
-  }
+  if (isKaramayClaim) {
+    if (role === "branch_manager" || role === "membership_specialist") {
+      updates.branch_manager_reviewed_by = data.branchManagerName || data.branchManagerEmail || data.financeManagerName || data.financeManagerEmail || "";
+    }
 
-  if (role === "membership_specialist") {
-    updates.checked_by = data.financeManagerName || data.financeManagerEmail || "";
-    updates.verified_by = data.financeManagerName || data.financeManagerEmail || "";
-  }
+    if (role === "savings_credit_head") {
+      updates.savings_credit_approved_by = data.status === "Approved" || data.status === "Rejected"
+        ? data.financeManagerName || data.financeManagerEmail || ""
+        : "";
+    }
 
-  if (role === "finance_head") {
-    updates.finance_checked_by = data.financeManagerName || data.financeManagerEmail || "";
-  }
+    if (typeof data.notes !== "undefined") {
+      updates.remarks = data.notes || "";
+    }
+  } else {
+    if (role === "branch_manager") {
+      updates.checked_by = data.branchManagerName || data.branchManagerEmail || "";
+      updates.verified_by = data.branchManagerName || data.branchManagerEmail || "";
+    }
 
-  if (role === "savings_credit_head") {
-    updates.approved_by = data.status === "Approved" || data.status === "Rejected"
-      ? data.financeManagerName || data.financeManagerEmail || ""
-      : "";
-  }
+    if (role === "membership_specialist") {
+      updates.checked_by = data.financeManagerName || data.financeManagerEmail || "";
+      updates.verified_by = data.financeManagerName || data.financeManagerEmail || "";
+    }
 
-  if (typeof data.notes !== "undefined") {
-    updates.remarks = data.notes || "";
+    if (role === "finance_head") {
+      updates.finance_checked_by = data.financeManagerName || data.financeManagerEmail || "";
+    }
+
+    if (role === "savings_credit_head") {
+      updates.approved_by = data.status === "Approved" || data.status === "Rejected"
+        ? data.financeManagerName || data.financeManagerEmail || ""
+        : "";
+    }
+
+    if (typeof data.notes !== "undefined") {
+      updates.remarks = data.notes || "";
+    }
   }
 
   const { data: updated, error } = await db
-    .from(SUPABASE_TABLES.claims)
+    .from(tableName)
     .update(updates)
     .eq("claim_id", data.request_id)
     .select("claim_id")
@@ -1046,6 +1182,10 @@ async function handleSupabaseAction(payload) {
       return supabaseGetRequests(payload);
     case "updateStatus":
       return supabaseUpdateStatus(payload);
+    case "createKaramayClaim":
+      return supabaseCreateKaramayClaim(payload);
+    case "getKaramayClaims":
+      return supabaseGetKaramayClaims(payload);
     case "getDashboardCounts":
       return supabaseGetDashboardCounts(payload);
     case "getSettings":
@@ -1106,6 +1246,7 @@ let allUsers = [];
 let allMembers = [];
 let allBranches = [];
 let allHospitals = [];
+let allKaramayClaims = [KARAMAY_CLAIM_HEADERS];
 let segmentationRates = {};
 let editingUserEmail = null;
 
@@ -1435,11 +1576,22 @@ function setDashboardUserDetails() {
   loadUserProfile();
 }
 
+function closeAllModals() {
+  document.querySelectorAll(".modal").forEach(modal => {
+    modal.classList.remove("active");
+    modal.style.display = "none";
+    modal.style.pointerEvents = "none";
+    modal.style.opacity = "0";
+  });
+}
+
 async function openRequestModal() {
+  closeAllModals();
   const modal = document.getElementById("requestModal");
   resetRequestForm();
   if (modal) {
     modal.style.display = "flex";
+    modal.classList.add("active");
   }
 
   if (!allMembers.length || !allHospitals.length || !Object.keys(segmentationRates).length) {
@@ -1453,9 +1605,40 @@ async function openRequestModal() {
 function closeRequestModal() {
   const modal = document.getElementById("requestModal");
   if (modal) {
+    modal.classList.remove("active");
     modal.style.display = "none";
+    modal.style.pointerEvents = "none";
+    modal.style.opacity = "0";
   }
   resetRequestForm();
+}
+
+function openKaramayModal() {
+  closeAllModals();
+  const modal = document.getElementById("karamayModal");
+  if (!modal) return;
+
+  const branchId = localStorage.getItem("branchid") || "";
+  resetKaramayClaimForm();
+  setInputValue("karamayMemberBranchId", branchId);
+
+  modal.style.display = "flex";
+  modal.style.visibility = "visible";
+  modal.style.opacity = "1";
+  modal.style.pointerEvents = "auto";
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+}
+
+function closeKaramayModal() {
+  const modal = document.getElementById("karamayModal");
+  if (modal) {
+    modal.classList.remove("active");
+    modal.style.display = "none";
+    modal.style.pointerEvents = "none";
+    modal.style.opacity = "0";
+  }
+  resetKaramayClaimForm();
 }
 
 function setInputValue(id, value) {
@@ -1949,16 +2132,22 @@ async function updateStatus(id, status) {
     }
   }
 
-  const currentRequest = Array.isArray(allRequests)
+  let currentRequest = Array.isArray(allRequests)
     ? allRequests.find(row => Array.isArray(row) && String(row[0]) === String(id))
     : null;
+
+  if (!currentRequest && String(id || "").startsWith("KRM") && Array.isArray(allKaramayClaims)) {
+    currentRequest = allKaramayClaims.find(row => Array.isArray(row) && String(row[0]) === String(id));
+  }
 
   let updateData = {
     action: "updateStatus",
     request_id: id,
     status: status,
     role: role,
-    dateStamp: currentRequest ? currentRequest[11] : "",
+    dateStamp: currentRequest
+      ? (String(id || "").startsWith("KRM") ? currentRequest[12] : currentRequest[11])
+      : "",
     notes: notes
   };
 
@@ -2024,6 +2213,51 @@ let workflowRequestsPromise = null;
 
 function normalizeValue(value) {
   return String(value ?? "").trim().toLowerCase();
+}
+
+function parseStoredUserIdentifier() {
+  const stored = localStorage.getItem("user");
+  if (!stored) return "";
+
+  try {
+    const parsed = JSON.parse(stored);
+    if (parsed && typeof parsed === "object") {
+      return String(parsed.email || parsed.name || parsed.fullname || stored).trim();
+    }
+  } catch (err) {
+    // ignore parse errors, stored value is already a plain string
+  }
+
+  return String(stored).trim();
+}
+
+function userMatchesEncodedBy(encodedByValue) {
+  const encodedBy = normalizeValue(encodedByValue);
+  const currentUser = normalizeValue(parseStoredUserIdentifier());
+  const currentFullname = normalizeValue(localStorage.getItem("fullname"));
+
+  if (!encodedBy) return true;
+  if (!currentUser && !currentFullname) return false;
+
+  return [currentUser, currentFullname].some(id => id && (encodedBy === id || encodedBy.includes(id)));
+}
+
+function parseDateString(value) {
+  if (value instanceof Date) return value;
+  const raw = String(value || "").trim();
+  if (!raw) return null;
+
+  const parsed = new Date(raw);
+  if (!Number.isNaN(parsed.getTime())) return parsed;
+
+  const transformed = raw.replace(/\s+/g, "T").replace(/-/g, "/");
+  const fallback = new Date(transformed);
+  return Number.isNaN(fallback.getTime()) ? null : fallback;
+}
+
+function formatDateTimeForDisplay(value) {
+  const date = parseDateString(value);
+  return date ? date.toLocaleString() : String(value || "N/A");
 }
 
 function escapeHtml(value) {
@@ -2508,7 +2742,13 @@ function rejectRequest() {
 }
 
 function closeModal() {
-  document.getElementById("modal").style.display = "none";
+  const modal = document.getElementById("modal");
+  if (!modal) return;
+  modal.style.display = "none";
+  modal.style.pointerEvents = "none";
+  modal.style.opacity = "0";
+  modal.classList.remove("active");
+  modal.setAttribute("aria-hidden", "true");
 }
 
 async function printRequest() {
@@ -2860,56 +3100,6 @@ function initializeFinancePage() {
   }
 }
 
-function navigateToBranch(page) {
-  // Update sidebar active state
-  document.querySelectorAll('.sidebar-main .sidebar-btn, .sidebar-more .sidebar-btn').forEach(btn => btn.classList.remove('active'));
-  const selectedButton = Array.from(document.querySelectorAll('.sidebar-main .sidebar-btn, .sidebar-more .sidebar-btn'))
-    .find(btn => btn.getAttribute('onclick')?.includes(`navigateToBranch('${page}')`));
-  if (selectedButton) selectedButton.classList.add('active');
-
-  const headerTitle = document.querySelector('.main-header h1');
-  const subtitle = document.querySelector('.main-header .subtitle');
-  const headerActions = document.querySelector('.main-header .header-actions');
-
-  if (page === 'review') {
-    if (headerTitle) headerTitle.innerText = '🔧 Branch Manager Review';
-    if (subtitle) subtitle.innerText = 'Review withdrawal requests submitted by Tellers · Forward approved requests to Savings and Credit Head';
-    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()"><span>🔄</span> Refresh</button>';
-    loadBranchTable();
-    loadBranchCounts();
-  } else if (page === 'dashboard') {
-    if (headerTitle) headerTitle.innerText = '📊 Branch Dashboard';
-    if (subtitle) subtitle.innerText = 'Overview of branch activity, pending tasks, and forwarded approvals';
-    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()"><span>🔄</span> Refresh</button>';
-    loadBranchCounts();
-  } else if (page === 'submitted') {
-    if (headerTitle) headerTitle.innerText = '✅ Submitted to Savings and Credit Head';
-    if (subtitle) subtitle.innerText = 'Requests you have forwarded and are awaiting finance review.';
-    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()"><span>🔄</span> Refresh</button>';
-    loadBranchSubmitted();
-  } else if (page === 'notifications') {
-    if (headerTitle) headerTitle.innerText = '🔔 Notifications';
-    if (subtitle) subtitle.innerText = 'Branch Manager alerts and updates';
-    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()"><span>🔄</span> Refresh</button>';
-  } else if (page === 'settings') {
-    if (headerTitle) headerTitle.innerText = '⚙️ Settings';
-    if (subtitle) subtitle.innerText = 'Branch Manager preferences and account settings';
-    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()"><span>🔄</span> Refresh</button>';
-  }
-
-  const reviewView = document.getElementById('reviewView');
-  const dashboardView = document.getElementById('dashboardView');
-  const submittedView = document.getElementById('submittedView');
-  const notificationsView = document.getElementById('notificationsView');
-  const settingsView = document.getElementById('settingsView');
-
-  if (reviewView) reviewView.style.display = (page === 'review') ? 'block' : 'none';
-  if (dashboardView) dashboardView.style.display = (page === 'dashboard') ? 'block' : 'none';
-  if (submittedView) submittedView.style.display = (page === 'submitted') ? 'block' : 'none';
-  if (notificationsView) notificationsView.style.display = (page === 'notifications') ? 'block' : 'none';
-  if (settingsView) settingsView.style.display = (page === 'settings') ? 'block' : 'none';
-}
-
 function loadBranchSubmitted() {
   const branchId = localStorage.getItem("branchid");
   fetch(API, {
@@ -2968,16 +3158,24 @@ function navigateToFinance(page) {
   // Update header
   const headerTitle = document.querySelector('.main-header h1');
   const subtitle = document.querySelector('.main-header .subtitle');
+  const headerActions = document.querySelector('.main-header .header-actions');
   if (headerTitle && subtitle) {
     if (page === 'dashboard') {
       headerTitle.innerText = '💜 Finance Dashboard';
       subtitle.innerText = 'Overview of approvals, trends, and monthly performance.';
+      if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button>';
     } else if (page === 'audit') {
       headerTitle.innerText = '💜 Audit Logs';
       subtitle.innerText = 'Audit history and request activity for review.';
+      if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button>';
+    } else if (page === 'karamay') {
+      headerTitle.innerText = '🧾 Karamay Claims';
+      subtitle.innerText = 'Review Karamay claims submitted by CRS';
+      if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="loadKaramayClaims()">Refresh</button>';
     } else {
       headerTitle.innerText = '💜 Savings and Credit Head Approval';
       subtitle.innerText = 'Review requests forwarded by Branch Manager · Approve or reject withdrawal requests';
+      if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button>';
     }
   }
 
@@ -2985,10 +3183,12 @@ function navigateToFinance(page) {
   const approvalQueue = document.getElementById('approvalQueueView');
   const dashboard = document.getElementById('dashboardView');
   const audit = document.getElementById('auditView');
+  const karamayView = document.getElementById('karamayView');
 
   if (approvalQueue) approvalQueue.style.display = (page === 'approval') ? 'block' : 'none';
   if (dashboard) dashboard.style.display = (page === 'dashboard') ? 'block' : 'none';
   if (audit) audit.style.display = (page === 'audit') ? 'block' : 'none';
+  if (karamayView) karamayView.style.display = (page === 'karamay') ? 'block' : 'none';
 
   console.log("Navigate to finance page:", page);
 
@@ -2998,12 +3198,8 @@ function navigateToFinance(page) {
     loadFinanceDashboard();
   } else if (page === 'audit') {
     loadAuditLogs();
-  }
-}
-
-async function loadFinanceDashboard() {
-  if (!Array.isArray(allRequests) || allRequests.length === 0) {
-    await loadWorkflowRequests();
+  } else if (page === 'karamay') {
+    loadKaramayClaims();
   }
   if (!Array.isArray(allRequests)) return;
 
@@ -3802,6 +3998,402 @@ async function saveSegmentationRates() {
 }
 
 // 🔧 TELLER NAVIGATION
+const KARAMAY_LOCAL_STORAGE_KEY = "karamayClaims";
+
+function getInputTrim(id) {
+  return document.getElementById(id)?.value.trim() || "";
+}
+
+function getKaramayStatusLabel(status) {
+  const labels = {
+    Pending: "For Branch Manager Review",
+    Forwarded: "For Savings and Credit Head Approval",
+    Approved: "Approved",
+    Returned: "Returned for Correction",
+    Rejected: "Rejected"
+  };
+  return labels[status] || status || "";
+}
+
+function readStoredKaramayClaims() {
+  try {
+    const stored = JSON.parse(localStorage.getItem(KARAMAY_LOCAL_STORAGE_KEY) || "[]");
+    return [
+      KARAMAY_CLAIM_HEADERS,
+      ...(Array.isArray(stored) ? stored : [])
+    ];
+  } catch (err) {
+    return [KARAMAY_CLAIM_HEADERS];
+  }
+}
+
+function mergeKaramayClaims(apiData, localData) {
+  const merged = [];
+  const seenIds = new Set();
+
+  (apiData.slice(1).filter(Array.isArray) || []).forEach(row => {
+    const claimId = String(row[0] || "").trim();
+    if (claimId && !seenIds.has(claimId)) {
+      seenIds.add(claimId);
+      merged.push(row);
+    }
+  });
+
+  (localData.slice(1).filter(Array.isArray) || []).forEach(row => {
+    const claimId = String(row[0] || "").trim();
+    if (claimId && !seenIds.has(claimId)) {
+      seenIds.add(claimId);
+      merged.push(row);
+    }
+  });
+
+  return [KARAMAY_CLAIM_HEADERS, ...merged];
+}
+
+function writeStoredKaramayClaim(row) {
+  const rows = readStoredKaramayClaims().slice(1);
+  rows.unshift(row);
+  localStorage.setItem(KARAMAY_LOCAL_STORAGE_KEY, JSON.stringify(rows));
+}
+
+function shouldUseKaramayLocalFallback(data) {
+  if (!data || data.success !== false) return false;
+  const message = String(data.message || "").toLowerCase();
+  return message.includes("unknown action") || message.includes("supabase request failed");
+}
+
+function getKaramaySortTime(row) {
+  if (!Array.isArray(row)) return 0;
+  const parsed = new Date(row[12] || "").getTime();
+  if (!Number.isNaN(parsed)) return parsed;
+  const idMatch = String(row[0] || "").match(/(\d{10,})/);
+  return idMatch ? Number(idMatch[1]) : 0;
+}
+
+function sortKaramayClaimsNewestFirst(data) {
+  if (!Array.isArray(data) || !data.length) return [KARAMAY_CLAIM_HEADERS];
+  const hasHeader = Array.isArray(data[0]) && normalizeValue(data[0][0]) === "claimid";
+  const rows = data
+    .slice(hasHeader ? 1 : 0)
+    .filter(Array.isArray)
+    .sort((a, b) => getKaramaySortTime(b) - getKaramaySortTime(a));
+  return [KARAMAY_CLAIM_HEADERS, ...rows];
+}
+
+function resetKaramayClaimForm() {
+  [
+    "karamayMemberName",
+    "karamayMemberBranchId",
+    "karamayMemberAddress",
+    "karamayDateOfDeath",
+    "karamayBeneficiaryName",
+    "karamayRelationship",
+    "karamayBeneficiaryAddress",
+    "karamayContactNumber",
+    "karamayModeOfRelease",
+    "karamayDeathCertificate",
+    "karamayValidId"
+  ].forEach(id => setInputValue(id, ""));
+}
+
+async function submitKaramayClaim() {
+  const deathCertificate = await readRequestAttachments("karamayDeathCertificate");
+  const validId = await readRequestAttachments("karamayValidId");
+  const attachments = [
+    ...deathCertificate.map(file => ({ ...file, document_type: "Death Certificate" })),
+    ...validId.map(file => ({ ...file, document_type: "Beneficiary Valid ID" }))
+  ];
+
+  const payload = {
+    action: "createKaramayClaim",
+    memberName: getInputTrim("karamayMemberName"),
+    memberBranchId: getInputTrim("karamayMemberBranchId") || localStorage.getItem("branchid") || "",
+    memberAddress: getInputTrim("karamayMemberAddress"),
+    dateOfDeath: getInputTrim("karamayDateOfDeath"),
+    beneficiaryName: getInputTrim("karamayBeneficiaryName"),
+    relationship: getInputTrim("karamayRelationship"),
+    beneficiaryAddress: getInputTrim("karamayBeneficiaryAddress"),
+    contactNumber: getInputTrim("karamayContactNumber"),
+    modeOfRelease: getInputTrim("karamayModeOfRelease") || "Actual Delivery (Bouquet and Cash)",
+    tellerName: localStorage.getItem("fullname"),
+    tellerEmail: localStorage.getItem("user"),
+    branchid: localStorage.getItem("branchid"),
+    attachments
+  };
+
+  if (!payload.memberName || !payload.memberBranchId || !payload.memberAddress || !payload.dateOfDeath) {
+    alert("Please complete the deceased member information.");
+    return;
+  }
+
+  if (!payload.beneficiaryName || !payload.relationship || !payload.beneficiaryAddress || !payload.contactNumber) {
+    alert("Please complete the beneficiary/requestor information.");
+    return;
+  }
+
+  if (attachments.length < 2) {
+    alert("Please upload both required attachments.");
+    return;
+  }
+
+  const localRow = [
+    generateID("KRM"),
+    payload.memberName,
+    payload.memberBranchId,
+    payload.memberAddress,
+    payload.dateOfDeath,
+    payload.beneficiaryName,
+    payload.relationship,
+    payload.beneficiaryAddress,
+    payload.contactNumber,
+    payload.modeOfRelease,
+    "Pending",
+    payload.tellerName || payload.tellerEmail || "",
+    new Date().toISOString(),
+    "",
+    "",
+    "",
+    attachments
+  ];
+
+  try {
+    const res = await fetch(API, {
+      method: "POST",
+      headers: APPS_SCRIPT_JSON_HEADERS,
+      body: JSON.stringify(payload)
+    });
+    const data = await parseApiJsonResponse(res);
+
+    if (!data.success) {
+      if (shouldUseKaramayLocalFallback(data)) {
+        writeStoredKaramayClaim(localRow);
+        alert("Karamay claim saved locally. Deploy the backend update to sync this workflow for other users.");
+        closeKaramayModal();
+      } else {
+        alert(data.message || "Failed to submit Karamay claim.");
+        return;
+      }
+    } else {
+      alert("Karamay claim forwarded to Branch Manager for review.");
+      closeKaramayModal();
+    }
+  } catch (err) {
+    writeStoredKaramayClaim(localRow);
+    alert("Karamay claim saved locally because the backend could not be reached.");
+    closeKaramayModal();
+  }
+
+  loadKaramayClaims();
+}
+
+async function loadKaramayClaims() {
+  let data = [KARAMAY_CLAIM_HEADERS];
+
+  try {
+    const res = await fetch(API, {
+      method: "POST",
+      headers: APPS_SCRIPT_JSON_HEADERS,
+      body: JSON.stringify({ action: "getKaramayClaims" })
+    });
+    const result = await parseApiJsonResponse(res);
+
+    if (Array.isArray(result) && result.length && Array.isArray(result[0])) {
+      const storedClaims = readStoredKaramayClaims();
+      data = storedClaims.length > 1 ? mergeKaramayClaims(result, storedClaims) : result;
+    } else if (shouldUseKaramayLocalFallback(result)) {
+      data = readStoredKaramayClaims();
+    } else {
+      console.warn("Unexpected Karamay claims payload, using local stored claims if available.", result);
+      data = readStoredKaramayClaims();
+    }
+  } catch (err) {
+    data = readStoredKaramayClaims();
+  }
+
+  allKaramayClaims = sortKaramayClaimsNewestFirst(data);
+  renderKaramayClaims();
+}
+
+function renderKaramayClaims() {
+  const role = getCurrentRole();
+  const normalizedRole = normalizeRole(role);
+  const branchId = String(localStorage.getItem('branchid') || '').trim();
+
+  const normalizedBranchId = normalizeValue(branchId);
+  const rows = (allKaramayClaims || [])
+    .slice(1)
+    .filter(row => Array.isArray(row))
+    .filter(row => {
+      if (normalizedRole === 'crs') {
+        return userMatchesEncodedBy(row[11]);
+      }
+      if (normalizedRole === 'branch_manager' || normalizedRole === 'membership_specialist') {
+        const claimBranchId = normalizeValue(row[2]);
+        return claimBranchId === normalizedBranchId || claimBranchId === normalizeValue(getBranchName(branchId));
+      }
+      if (normalizedRole === 'savings_credit_head' || normalizedRole === 'finance_head' || normalizedRole === 'admin') {
+        return true;
+      }
+      return false;
+    });
+
+  const html = rows.map(row => {
+    const dateFiled = formatDateTimeForDisplay(row[12]);
+    return `
+      <tr>
+        <td>${escapeHtml(row[0])}</td>
+        <td>${escapeHtml(row[1])}</td>
+        <td>${escapeHtml(row[5])}</td>
+        <td>${escapeHtml(row[6])}</td>
+        <td>${escapeHtml(row[4])}</td>
+        <td><span class="${getStatusClass(row[10])}">${escapeHtml(getKaramayStatusLabel(row[10]))}</span></td>
+        <td>${escapeHtml(dateFiled)}</td>
+        <td><button class="btn blue" onclick="openKaramayClaimModal('${escapeHtml(row[0])}')">View</button></td>
+      </tr>
+    `;
+  }).join("");
+
+  const table = document.getElementById("karamayTable");
+  if (table) table.innerHTML = html || '<tr><td colspan="8">No Karamay claims found.</td></tr>';
+
+  const count = document.getElementById("karamayCount");
+  if (count) count.innerText = `${rows.length} claim${rows.length !== 1 ? "s" : ""}`;
+}
+
+function openKaramayClaimModal(id) {
+  const row = (allKaramayClaims || []).find(item => Array.isArray(item) && item[0] === id);
+  if (!row) return;
+
+  const attachments = normalizeAttachments(row[16] ?? row[row.length - 1] ?? []);
+  window.currentModalAttachments = attachments;
+  const attachmentHtml = attachments.length
+    ? attachments.map((attachment, index) => {
+      const type = attachment.document_type ? `${escapeHtml(attachment.document_type)}: ` : "";
+      return `<div style="margin-bottom: 8px;">${type}${renderAttachmentPreview(attachment, index)}</div>`;
+    }).join("")
+    : '<span style="color:#777;">No attachments uploaded.</span>';
+
+  const dateFiled = formatDateTimeForDisplay(row[12]);
+
+  const modalContent = document.getElementById("modalContent");
+  if (modalContent) {
+    modalContent.innerHTML = `
+      <div style="margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px;">
+        <h3 style="margin: 0 0 5px 0;">Karamay Claim Details - ${escapeHtml(row[0])}</h3>
+        <p style="margin: 0; font-size: 13px; color: #666;">Status: ${escapeHtml(getKaramayStatusLabel(row[10]))} • Filed: ${escapeHtml(dateFiled)}</p>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 20px;">
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Deceased Member</label>
+          <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${escapeHtml(row[1])}</p>
+        </div>
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Branch</label>
+          <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${escapeHtml(getBranchName(row[2]) || row[2])}</p>
+        </div>
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Member Address</label>
+          <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(row[3])}</p>
+        </div>
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Date of Death</label>
+          <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(row[4])}</p>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-bottom: 20px;">
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Beneficiary / Requestor</label>
+          <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${escapeHtml(row[5])}</p>
+        </div>
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Relationship</label>
+          <p style="margin: 0; font-size: 16px; font-weight: 600; color: #333;">${escapeHtml(row[6])}</p>
+        </div>
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Beneficiary Address</label>
+          <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(row[7])}</p>
+        </div>
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Contact Number</label>
+          <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(row[8])}</p>
+        </div>
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Mode of Release</label>
+          <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(row[9])}</p>
+        </div>
+      </div>
+
+      <div style="margin-bottom: 20px;">
+        <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Attachments</label>
+        ${attachmentHtml}
+      </div>
+    `;
+  }
+
+  const modalFooter = document.querySelector('.modal-footer');
+  if (modalFooter) {
+    window.currentRequestId = id;
+
+    const approveBtn = document.getElementById('approveBtn');
+    const rejectBtn = document.getElementById('rejectBtn');
+    if (approveBtn) approveBtn.style.display = 'none';
+    if (rejectBtn) rejectBtn.style.display = 'none';
+
+    modalFooter.querySelectorAll('.role-action-btn').forEach(btn => btn.remove());
+
+    const role = getCurrentRole();
+    const status = String(row[10] || '').trim();
+
+    if ((role === 'branch_manager' || role === 'membership_specialist') && (status === 'Pending' || status === 'Returned')) {
+      const returnBtn = document.createElement('button');
+      returnBtn.className = 'btn red role-action-btn';
+      returnBtn.style.cssText = 'margin-left: auto; margin-right: 10px;';
+      returnBtn.textContent = 'Return';
+      returnBtn.onclick = () => updateStatus(id, 'Returned');
+      modalFooter.appendChild(returnBtn);
+
+      const verifyBtn = document.createElement('button');
+      verifyBtn.className = 'btn green role-action-btn';
+      verifyBtn.textContent = 'Verified';
+      verifyBtn.onclick = () => updateStatus(id, 'Forwarded');
+      modalFooter.appendChild(verifyBtn);
+    }
+
+    if (role === 'savings_credit_head' && status === 'Forwarded') {
+      if (approveBtn) {
+        approveBtn.style.display = 'block';
+        approveBtn.className = 'btn green';
+        approveBtn.style.cssText = '';
+      }
+      if (rejectBtn) {
+        rejectBtn.style.display = 'block';
+        rejectBtn.className = 'btn red';
+        rejectBtn.style.cssText = '';
+      }
+    }
+
+    if (role === 'crs' && status === 'Approved') {
+      const printBtn = document.createElement('button');
+      printBtn.className = 'btn blue role-action-btn';
+      printBtn.style.cssText = 'margin-left: auto; margin-right: 10px;';
+      printBtn.textContent = 'Print';
+      printBtn.onclick = printKaramayClaim;
+      modalFooter.appendChild(printBtn);
+    }
+  }
+
+  const modal = document.getElementById("modal");
+  if (modal) {
+    modal.style.display = "flex";
+    modal.style.pointerEvents = "auto";
+    modal.style.opacity = "1";
+    modal.classList.add("active");
+    modal.setAttribute("aria-hidden", "false");
+  }
+}
+
 function navigateToTeller(page) {
   // Update sidebar active state
   document.querySelectorAll('.sidebar-main .sidebar-btn, .sidebar-more .sidebar-btn').forEach(btn => btn.classList.remove('active'));
@@ -3816,6 +4408,9 @@ function navigateToTeller(page) {
     if (page === 'entry') {
       headerContent.innerHTML = '<h1>Withdrawal Entry</h1><p class="subtitle">Teller Portal · Submit requests to Branch Manager for review</p>';
       mainHeader.querySelector('.header-actions').innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button><button class="btn" onclick="alert(\'Export feature not configured yet\')">Export</button><button class="btn blue" onclick="openRequestModal()">New Withdrawal Request</button>';
+    } else if (page === 'karamay') {
+      headerContent.innerHTML = '<h1>Karamay Claims</h1><p class="subtitle">Customer Relations Specialist Portal - Encode Karamay requests and forward to Branch Manager</p>';
+      mainHeader.querySelector('.header-actions').innerHTML = '<button class="btn blue" onclick="openKaramayModal()">Create New Request</button><button class="btn" onclick="loadKaramayClaims()">Refresh</button>';
     } else if (page === 'submissions') {
       headerContent.innerHTML = '<h1>My Submitted Requests</h1><p class="subtitle">Teller Portal · View all your submitted withdrawal requests</p>';
       mainHeader.querySelector('.header-actions').innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button><button class="btn blue" onclick="openRequestModal()">New Request</button>';
@@ -3830,11 +4425,13 @@ function navigateToTeller(page) {
 
   // Toggle views
   const entryView = document.getElementById('entryView');
+  const karamayView = document.getElementById('karamayView');
   const submissionsView = document.getElementById('submissionsView');
   const historyView = document.getElementById('historyView');
   const notificationsView = document.getElementById('notificationsView');
 
   if (entryView) entryView.style.display = (page === 'entry') ? 'block' : 'none';
+  if (karamayView) karamayView.style.display = (page === 'karamay') ? 'block' : 'none';
   if (submissionsView) submissionsView.style.display = (page === 'submissions') ? 'block' : 'none';
   if (historyView) historyView.style.display = (page === 'history') ? 'block' : 'none';
   if (notificationsView) notificationsView.style.display = (page === 'notifications') ? 'block' : 'none';
@@ -3844,10 +4441,13 @@ function navigateToTeller(page) {
     loadTellerSubmissions();
   } else if (page === 'history') {
     loadTellerHistory();
+  } else if (page === 'karamay') {
+    loadKaramayClaims();
   }
 }
 
 function initializeTellerPage() {
+  closeAllModals();
   bindTellerClaimForm();
   loadTellerReferenceData().catch(err => console.warn("Unable to load teller reference data:", err));
 }
@@ -3975,7 +4575,7 @@ function openModal(id) {
   const financeCheckedBy = r[15] || "N/A";
   const approverName = r[10] || "N/A";
   const workflowNotes = r[14] || "";
-  const attachments = normalizeAttachments(r[16]);
+  const attachments = normalizeAttachments(r[16] ?? r[r.length - 1] ?? []);
   window.currentModalAttachments = attachments;
   const attachmentHtml = attachments.length
     ? attachments.map(renderAttachmentPreview).join("")
@@ -4349,6 +4949,15 @@ async function loadWorkflowRequests(forceRefresh = false) {
 }
 
 async function verifyRequestStatus(requestId, status) {
+  if (String(requestId || "").startsWith("KRM")) {
+    await loadKaramayClaims();
+    const row = Array.isArray(allKaramayClaims)
+      ? allKaramayClaims.find(item => Array.isArray(item) && String(item[0]) === String(requestId))
+      : null;
+
+    return Boolean(row && String(row[10]) === String(status));
+  }
+
   const requests = await loadWorkflowRequests(true);
   const row = Array.isArray(requests)
     ? requests.find(item => Array.isArray(item) && String(item[0]) === String(requestId))
@@ -4425,6 +5034,9 @@ function navigateToTeller(page) {
     if (page === 'entry') {
       if (headerContent) headerContent.innerHTML = '<h1>Claim Encoding</h1><p class="subtitle">Customer Relations Specialist Portal - Encode claim requests and upload supporting documents</p>';
       if (headerActions) headerActions.innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button><button class="btn" onclick="alert(\'Export feature not configured yet\')">Export</button><button class="btn blue" onclick="openRequestModal()">New Claim Request</button>';
+    } else if (page === 'karamay') {
+      if (headerContent) headerContent.innerHTML = '<h1>Karamay Claims</h1><p class="subtitle">Customer Relations Specialist Portal - Encode Karamay requests and forward to Branch Manager</p>';
+      if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="openKaramayModal()">Create New Request</button><button class="btn" onclick="loadKaramayClaims()">Refresh</button>';
     } else if (page === 'submissions') {
       if (headerContent) headerContent.innerHTML = '<h1>My Submitted Claims</h1><p class="subtitle">Customer Relations Specialist Portal - Monitor encoded claims</p>';
       if (headerActions) headerActions.innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button><button class="btn blue" onclick="openRequestModal()">New Claim</button>';
@@ -4438,17 +5050,20 @@ function navigateToTeller(page) {
   }
 
   const entryView = document.getElementById('entryView');
+  const karamayView = document.getElementById('karamayView');
   const submissionsView = document.getElementById('submissionsView');
   const historyView = document.getElementById('historyView');
   const notificationsView = document.getElementById('notificationsView');
 
   if (entryView) entryView.style.display = (page === 'entry') ? 'block' : 'none';
+  if (karamayView) karamayView.style.display = (page === 'karamay') ? 'block' : 'none';
   if (submissionsView) submissionsView.style.display = (page === 'submissions') ? 'block' : 'none';
   if (historyView) historyView.style.display = (page === 'history') ? 'block' : 'none';
   if (notificationsView) notificationsView.style.display = (page === 'notifications') ? 'block' : 'none';
 
   if (page === 'submissions') loadTellerSubmissions();
   else if (page === 'history') loadTellerHistory();
+  else if (page === 'karamay') loadKaramayClaims();
 }
 
 function navigateToBranch(page) {
@@ -4481,6 +5096,11 @@ function navigateToBranch(page) {
     if (headerTitle) headerTitle.innerText = 'Notifications';
     if (subtitle) subtitle.innerText = 'Membership verification alerts and updates';
     if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button>';
+  } else if (page === 'karamay') {
+    if (headerTitle) headerTitle.innerText = '🧾 Karamay Claims';
+    if (subtitle) subtitle.innerText = 'Review Karamay claims submitted for your branch';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="loadKaramayClaims()">Refresh</button>';
+    loadKaramayClaims();
   } else if (page === 'settings') {
     if (headerTitle) headerTitle.innerText = 'Settings';
     if (subtitle) subtitle.innerText = 'Membership verification preferences and account settings';
@@ -4492,12 +5112,14 @@ function navigateToBranch(page) {
   const submittedView = document.getElementById('submittedView');
   const notificationsView = document.getElementById('notificationsView');
   const settingsView = document.getElementById('settingsView');
+  const karamayView = document.getElementById('karamayView');
 
   if (reviewView) reviewView.style.display = (page === 'review') ? 'block' : 'none';
   if (dashboardView) dashboardView.style.display = (page === 'dashboard') ? 'block' : 'none';
   if (submittedView) submittedView.style.display = (page === 'submitted') ? 'block' : 'none';
   if (notificationsView) notificationsView.style.display = (page === 'notifications') ? 'block' : 'none';
   if (settingsView) settingsView.style.display = (page === 'settings') ? 'block' : 'none';
+  if (karamayView) karamayView.style.display = (page === 'karamay') ? 'block' : 'none';
 }
 
 function navigateToFinance(page) {
@@ -4523,6 +5145,9 @@ function navigateToFinance(page) {
     } else if (page === 'audit') {
       headerTitle.innerText = 'Audit Logs';
       subtitle.innerText = 'Claim activity and workflow history';
+    } else if (page === 'karamay') {
+      headerTitle.innerText = '🧾 Karamay Claims';
+      subtitle.innerText = 'Review Karamay claims submitted by CRS';
     } else {
       headerTitle.innerText = isFinanceHead ? 'Finance and Accounting Review' : 'Savings and Credit Head Approval';
       subtitle.innerText = isFinanceHead
@@ -4534,14 +5159,17 @@ function navigateToFinance(page) {
   const approvalQueue = document.getElementById('approvalQueueView');
   const dashboard = document.getElementById('dashboardView');
   const audit = document.getElementById('auditView');
+  const karamayView = document.getElementById('karamayView');
 
   if (approvalQueue) approvalQueue.style.display = (page === 'approval') ? 'block' : 'none';
   if (dashboard) dashboard.style.display = (page === 'dashboard') ? 'block' : 'none';
   if (audit) audit.style.display = (page === 'audit') ? 'block' : 'none';
+  if (karamayView) karamayView.style.display = (page === 'karamay') ? 'block' : 'none';
 
   if (page === 'approval') loadFinanceTable();
   else if (page === 'dashboard') loadFinanceDashboard();
   else if (page === 'audit') loadAuditLogs();
+  else if (page === 'karamay') loadKaramayClaims();
 }
 
 async function loadTellerCounts() {
@@ -4909,6 +5537,253 @@ async function printRequest() {
   `);
   printWindow.document.close();
 
+  setTimeout(() => {
+    printWindow.focus();
+    printWindow.print();
+    printWindow.close();
+  }, 500);
+}
+
+async function printKaramayClaim() {
+  const role = getCurrentRole();
+  if (role !== 'crs') {
+    alert('Only CRS can print Karamay claim reports.');
+    return;
+  }
+
+  const r = Array.isArray(allKaramayClaims)
+    ? allKaramayClaims.find(item => Array.isArray(item) && String(item[0]) === String(window.currentRequestId))
+    : null;
+
+  if (!r || String(r[10] || '').trim() !== 'Approved') {
+    alert('Only approved Karamay claims can be printed.');
+    return;
+  }
+
+  let settings = {};
+  try {
+    const settingsRes = await fetch(API, {
+      method: 'POST',
+      body: JSON.stringify({ action: 'getSettings' })
+    });
+    const settingsData = await settingsRes.json();
+    settings = settingsData.settings || {};
+  } catch (err) {
+    console.warn('Unable to load print settings:', err);
+  }
+
+  const formatDate = value => {
+    if (!value) return '';
+    const raw = String(value);
+    const m = raw.match(/^(\d{4})-(\d{2})-(\d{2})/);
+    if (m) return `${m[2]}/${m[3]}/${m[1]}`;
+    const date = new Date(raw);
+    return Number.isNaN(date.getTime()) ? escapeHtml(raw) : date.toLocaleDateString('en-US');
+  };
+
+  const dateFiled = formatDate(r[12]);
+  const deceasedName = escapeHtml(String(r[1] || ''));
+  const branch = escapeHtml(getBranchName(r[2]) || String(r[2] || ''));
+  const deceasedAddress = escapeHtml(String(r[3] || ''));
+  const dateOfDeath = escapeHtml(String(r[4] || ''));
+  const beneficiaryName = escapeHtml(String(r[5] || ''));
+  const beneficiaryAddress = escapeHtml(String(r[7] || ''));
+  const relationship = escapeHtml(String(r[6] || ''));
+  const contactNumber = escapeHtml(String(r[8] || ''));
+  const modeOfRelease = escapeHtml(String(r[9] || ''));
+  const encodedBy = escapeHtml(String(r[11] || ''));
+  const branchManager = escapeHtml(String(r[13] || ''));
+  const savingsApprovedBy = escapeHtml(String(r[14] || settings.savingsCreditHeadName || settings.financeManagerName || 'Savings and Credit Head'));
+  const savingsCreditHeadSignature = settings.savingsCreditHeadSignatureData || settings.financeManagerSignatureData || '';
+  const notes = escapeHtml(String(r[15] || ''));
+  const headerImageSrc = settings.reportHeaderImage || settings.headerImage || '';
+
+  const printWindow = window.open('', 'PRINT', 'height=900,width=900');
+  if (!printWindow) return;
+
+  printWindow.document.write(`
+    <html>
+      <head>
+        <title>BMPC Karamay Program Claims Approval Form</title>
+        <style>
+          @page { size: 8.5in 13in portrait; margin: 0.25in; }
+          body { font-family: Arial, sans-serif; margin: 0.25in; color: #111; }
+          .page { width: 8in; max-width: 8in; margin: 0 auto; }
+          .header { text-align: center; margin-bottom: 18px; }
+          .header h1 { margin: 0; font-size: 20px; letter-spacing: 0.08em; }
+          .header .date { margin-top: 8px; font-size: 13px; text-align: right; }
+          .section-title { font-size: 13px; margin: 10px 0 4px; font-weight: 700; letter-spacing: 0.06em; }
+          .field-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 14px; margin-bottom: 10px; }
+          .field-line { display: flex; justify-content: space-between; align-items: flex-start; border: 1px solid #111; border-top: none; padding: 8px 10px; min-height: auto; font-size: 13px; }
+          .field-grid > .field-line:nth-child(-n+2) { border-top: 1px solid #111; }
+          .field-label { font-size: 12px; font-weight: 600; color: #222; margin-right: 10px; white-space: nowrap; }
+          .field-value { flex: 1; text-align: right; word-break: break-word; white-space: normal; }
+          .requirements-box { border: none; margin-bottom: 8px; }
+          .requirement-line { display: flex; align-items: center; gap: 8px; font-size: 13px; padding: 6px 10px; }
+          .requirement-line:last-child { border-bottom: none; }
+          .requirement-checkbox { display: inline-flex; align-items: center; gap: 6px; cursor: default; white-space: nowrap; }
+          .requirement-checkbox input { margin: 0; flex: none; }
+          .agreement-text { font-size: 12px; margin: 8px 0 4px; line-height: 1.4; }
+          .agreement-signature { display: flex; flex-direction: column; align-items: center; margin-bottom: 8px; width: 100%; }
+          .signature-line-single { border-top: 1px solid #111; width: 45%; max-width: 7.1in; height: 0; }
+          .agreement-caption { font-size: 12px; margin-top: 4px; }
+          .agreement-date { font-size: 12px; margin-top: 2px; }
+          .statement { font-size: 12px; line-height: 1.4; margin: 6px 0 8px; }
+          .statement ol { padding-left: 18px; margin: 4px 0 0; }
+          .statement li { margin-bottom: 4px; }
+          .verification-title { font-size: 12px; margin: 12px 0 4px; font-weight: 700; text-align: center; }
+          .verification-row { display: flex; align-items: center; gap: 10px; font-size: 12px; margin-bottom: 6px; }
+          .checkbox-square { display: inline-block; font-family: monospace; font-size: 12px; margin-right: 4px; vertical-align: middle; }
+          .verification-label { min-width: 130px; }
+          .remarks-row { display: flex; align-items: flex-start; gap: 10px; font-size: 12px; margin-bottom: 10px; }
+          .remarks-row .remarks-line { flex: 1; border-bottom: 1px solid #111; padding: 4px 0; min-height: 18px; }
+          .footer-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 14px; text-align: center; align-items: start; }
+          .footer-block { display: flex; flex-direction: column; justify-content: flex-start; padding-top: 0; border-top: none; font-size: 13px; line-height: 1.1; }
+          .footer-block strong { display: block; margin: 0; }
+          .footer-block .footer-role { display: block; margin: 0; font-size: 12px; line-height: 1.1; }
+          .signature-preview { max-width: 1.8in; max-height: 0.5in; display: block; margin: 0.08in auto 0.04in; object-fit: contain; }
+          .release { margin-top: 14px; border-top: 1px solid #111; padding-top: 10px; }
+          .release-title { text-align: center; font-size: 12px; font-weight: 600; margin-bottom: 8px; }
+          .release-label-row { font-size: 12px; margin-bottom: 6px; }
+          .release-mode { display: flex; align-items: center; gap: 8px; font-size: 12px; margin-bottom: 4px; }
+          .release-mode span { display: inline-flex; width: 14px; height: 14px; border: 1px solid #111; margin-top: 2px; }
+          .release-fields { display: flex; gap: 12px; font-size: 12px; margin: 10px 0; }
+          .release-column { flex: 1; display: flex; flex-direction: column; gap: 4px; }
+          .release-date-label { font-size: 12px; font-weight: 600; }
+          .release-date-line { border-bottom: 1px solid #111; min-height: 20px; }
+          .release-sublabels { display: flex; justify-content: space-between; gap: 12px; font-size: 12px; }
+          .release-sublabel { flex: 1; }
+          .release-sublabel span { display: inline-block; }
+          .signature-lines { display: grid; grid-template-columns: repeat(2, 1fr); gap: 20px; margin-top: 8px; }
+          .signature-block { text-align: left; font-size: 12px; }
+          .signature-caption { margin-top: 6px; font-size: 12px; }
+          .signature-date { margin-top: 4px; font-size: 12px; }
+          .signature-line { border-top: 1px solid #111; margin-top: 12px; padding-top: 4px; }
+          .footer-block { padding-top: 30px; border-top: none; font-size: 13px; }
+          .release { margin-top: 20px; border-top: 1px solid #111; padding-top: 14px; }
+          .release-row { display: flex; gap: 12px; margin-bottom: 8px; }
+          .release-box { flex: 1; border: 1px solid #111; min-height: 24px; padding: 8px 10px; font-size: 13px; }
+          .release-label { font-size: 12px; color: #333; margin-bottom: 4px; display: block; }
+          .signature-lines { display: flex; gap: 14px; margin-top: 24px; }
+          .signature-block { flex: 1; text-align: center; font-size: 12px; }
+          .signature-line { border-top: 1px solid #111; margin-top: 12px; padding-top: 4px; }
+          @media print { body { margin: 0; } }
+        </style>
+      </head>
+      <body>
+        <div class="page">
+          <div class="header">
+            <h1>BMPC KARAMAY PROGRAM</h1>
+            <h1>CLAIMS APPROVAL FORM</h1>
+            <div class="date"><strong>Date Filed:</strong> ${dateFiled}</div>
+          </div>
+
+          <div class="section-title">I. MEMBER INFORMATION (DECEASED MEMBER)</div>
+          <div class="field-grid">
+            <div class="field-line"><span class="field-label">Name:</span><span class="field-value">${deceasedName}</span></div>
+            <div class="field-line"><span class="field-label">Branch:</span><span class="field-value">${branch}</span></div>
+            <div class="field-line"><span class="field-label">Address:</span><span class="field-value">${deceasedAddress}</span></div>
+            <div class="field-line"><span class="field-label">Date of Death:</span><span class="field-value">${dateOfDeath}</span></div>
+          </div>
+
+          <div class="section-title">II. BENEFICIARY / REQUESTOR INFORMATION</div>
+          <div class="field-grid">
+            <div class="field-line"><span class="field-label">Name:</span><span class="field-value">${beneficiaryName}</span></div>
+            <div class="field-line"><span class="field-label">Address:</span><span class="field-value">${beneficiaryAddress}</span></div>
+            <div class="field-line"><span class="field-label">Relationship to the Deceased:</span><span class="field-value">${relationship}</span></div>
+            <div class="field-line"><span class="field-label">Contact Number:</span><span class="field-value">${contactNumber}</span></div>
+          </div>
+
+          <div class="section-title">III. REQUIREMENTS SUBMITTED</div>
+          <div class="requirements-box">
+            <div style="display: flex; gap: 20px;">
+              <div class="requirement-line"><label class="requirement-checkbox"><input type="checkbox" disabled>Certified True Copy of Death Certificate</label></div>
+              <div class="requirement-line"><label class="requirement-checkbox"><input type="checkbox" disabled>Photocopy of valid ID of Beneficiary/Requestor</label></div>
+            </div>
+          </div>
+
+          <div class="section-title">IV. CERTIFICATION AND UNDERTAKING</div>
+          <div class="statement">
+            I hereby certify that the information provided above is true and correct. I understand that the additional bereavement support is granted only once per deceased member and is subject to existing policies of Barbaza Multi-Purpose Cooperative.
+          </div>
+          <div class="statement">
+            I further understand that:
+            <ol>
+              <li>I am the duly declared beneficiary of the deceased member and, as such, I am entitled to receive the bereavement benefits provided by the Cooperative in accordance with the BMPC KARAMAY Program and its implementing guidelines.</li>
+              <li>In cases of late notification, or when the delivery of the flower bouquet is no longer feasible or practical, I acknowledge that the Cooperative shall provide cash assistance amounting to Two Thousand Pesos (P2,000.00).</li>
+              <li>When the delivery of the standard bereavement benefits is feasible, I acknowledge that I am the authorized recipient of the flower bouquet and cash benefits provided by the Cooperative.</li>
+              <li>Should I be unavailable to personally receive the delivered benefits, I authorize the Cooperative to release the same to my designated immediate family representative on my behalf, subject to the Cooperative's verification procedures and the representative's acknowledgment of receipt.</li>
+              <li>I understand that the Cooperative reserves the right to verify my identity, beneficiary status, and entitlement prior to the release or crediting of any program benefits.</li>
+            </ol>
+          </div>
+          <div class="agreement-text">
+            I agree to comply with all requirements and acknowledge receipt of the approved benefits.
+          </div>
+          <div style="margin-top: 24px;"></div>
+          <div class="agreement-signature">
+            <div class="signature-line-single"></div>
+            <div class="agreement-caption">Signature over printed name of Beneficiary/Requestor</div>
+            <div class="agreement-date">Date: ____________________</div>
+          </div>
+
+          <div class="section-separator"></div>
+          <div class="verification-title">VERIFICATION (TO BE FILLED BY BMPC STAFF)</div>
+          <div class="verification-row"><span class="verification-label">Member Status Verified:</span><span class="checkbox-square">[ ]</span>Yes<span class="checkbox-square">[ ]</span>No</div>
+          <div class="verification-row"><span class="verification-label">Eligibility Confirmed:</span><span class="checkbox-square">[ ]</span>Yes<span class="checkbox-square">[ ]</span>No</div>
+          <div class="remarks-row"><span class="verification-label">Remarks:</span><span class="remarks-line">${notes || ''}</span></div>
+
+          <div class="footer-grid">
+            <div class="footer-block">
+              Prepared by:<br><br>
+              <strong>${encodedBy}</strong>
+              <span class="footer-role">CRS</span>
+            </div>
+            <div class="footer-block">
+              Noted by:<br><br>
+              <strong>${branchManager}</strong>
+              <span class="footer-role">Branch Manager/OIC</span>
+            </div>
+            <div class="footer-block">
+              Approved:<br><br>
+              ${savingsCreditHeadSignature ? `<img class="signature-preview" src="${escapeHtml(savingsCreditHeadSignature)}" alt="Savings and Credit Head signature">` : ''}
+              <strong>${savingsApprovedBy}</strong>
+              <span class="footer-role">SAC / MMD Head</span>
+            </div>
+          </div>
+
+          <div class="release">
+            <div class="release-title">RELEASE / DISBURSEMENT</div>
+            <div style="display: flex; gap: 40px; margin-bottom: 40px;">
+              <div style="flex: 0 0 auto;">
+                <div class="release-label-row"><strong>Mode of Release:</strong></div>
+                <div class="release-mode"><input type="checkbox" disabled ${modeOfRelease === 'Actual Delivery (Bouquet and Cash)' ? 'checked' : ''}> Actual Delivery (Bouquet and Cash)</div>
+                <div class="release-mode"><input type="checkbox" disabled ${modeOfRelease === 'Php 2,000.00 cash equivalent' ? 'checked' : ''}> Php 2,000.00 cash equivalent</div>
+              </div>
+              <div style="flex: 1; text-align: right;">
+                <div style="width: 100%; font-size: 12px;"><strong>Date Released:</strong> ____________________________</div>
+              </div>
+            </div>
+            <div style="display: flex; gap: 40px;">
+              <div style="flex: 1;">
+                <div style="font-size: 12px; font-weight: 600; margin-bottom: 16px;"><strong>Released by:</strong></div>
+                <div class="signature-line" style="margin-bottom: 8px;"></div>
+                <div style="font-size: 11px; text-align: center;">Signature over printed name</div>
+                <div style="font-size: 11px; text-align: center; margin-top: 2px;">Date: _____________</div>
+              </div>
+              <div style="flex: 1;">
+                <div style="font-size: 12px; font-weight: 600; margin-bottom: 16px;"><strong>Received by:</strong></div>
+                <div class="signature-line" style="margin-bottom: 8px;"></div>
+                <div style="font-size: 11px; text-align: center;">Signature over printed name</div>
+                <div style="font-size: 11px; text-align: center; margin-top: 2px;">Date: _____________</div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </body>
+    </html>
+  `);
+
+  printWindow.document.close();
   setTimeout(() => {
     printWindow.focus();
     printWindow.print();

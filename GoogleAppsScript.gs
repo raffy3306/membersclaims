@@ -6,6 +6,7 @@ const SHEET_ID = "11KAJ9BVnXOwCbbKDh7TGWIdz5qbURYEo8V_1wvrjK9Y";
 const SHEETS = {
   users: "Users",
   claims: "Claims",
+  karamayClaims: "Karamay Claims",
   members: "Members",
   branches: "Branches",
   hospitals: "Hospitals",
@@ -39,6 +40,26 @@ const CLAIM_HEADERS = [
   "DateDischarged",
   "ActualDaysConfined",
   "Diagnosis"
+];
+
+const KARAMAY_CLAIM_HEADERS = [
+  "ClaimID",
+  "MemberName",
+  "MemberBranchId",
+  "MemberAddress",
+  "DateOfDeath",
+  "BeneficiaryName",
+  "Relationship",
+  "BeneficiaryAddress",
+  "ContactNumber",
+  "ModeOfRelease",
+  "Status",
+  "EncodedBy",
+  "DateStamp",
+  "BranchManagerReviewedBy",
+  "SavingsCreditApprovedBy",
+  "Notes",
+  "Attachments"
 ];
 
 const USER_HEADERS = [
@@ -283,9 +304,25 @@ function ensureHeaders(sheet, requiredHeaders) {
   }
 }
 
+function getSheetByNameFlexible(spreadsheet, sheetName) {
+  const exact = spreadsheet.getSheetByName(sheetName);
+  if (exact) return exact;
+
+  const normalizedTarget = normalizeHeaderName(sheetName);
+  const sheets = spreadsheet.getSheets();
+
+  for (let i = 0; i < sheets.length; i++) {
+    if (normalizeHeaderName(sheets[i].getName()) === normalizedTarget) {
+      return sheets[i];
+    }
+  }
+
+  return null;
+}
+
 function getSheet(sheetName, requiredHeaders) {
   const spreadsheet = getSpreadsheet();
-  let sheet = spreadsheet.getSheetByName(sheetName);
+  let sheet = getSheetByNameFlexible(spreadsheet, sheetName);
 
   if (!sheet) {
     sheet = spreadsheet.insertSheet(sheetName);
@@ -451,6 +488,95 @@ function getRequests() {
   }
 }
 
+function karamayClaimRowToLegacy(meta, row) {
+  return [
+    getCell(meta, row, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, ""),
+    getCell(meta, row, ["MemberName", "Member Name"], 1, ""),
+    getCell(meta, row, ["MemberBranchId", "Member Branch ID", "BranchId", "Branch ID"], 2, ""),
+    getCell(meta, row, ["MemberAddress", "Member Address"], 3, ""),
+    formatDateOnly(getCell(meta, row, ["DateOfDeath", "Date Of Death"], 4, "")),
+    getCell(meta, row, ["BeneficiaryName", "Beneficiary Name", "RequestorName", "Requestor Name"], 5, ""),
+    getCell(meta, row, ["Relationship"], 6, ""),
+    getCell(meta, row, ["BeneficiaryAddress", "Beneficiary Address", "RequestorAddress", "Requestor Address"], 7, ""),
+    getCell(meta, row, ["ContactNumber", "Contact Number"], 8, ""),
+    getCell(meta, row, ["ModeOfRelease", "Mode of Release", "mode_of_release", "modeOfRelease"], 9, "Actual Delivery (Bouquet and Cash)"),
+    getCell(meta, row, ["Status", "ClaimStatus", "Claim Status"], 10, "Pending"),
+    getCell(meta, row, ["EncodedBy", "Encoded By", "CreatedBy"], 11, ""),
+    formatDateTime(getCell(meta, row, ["DateStamp", "Date Stamp", "DateFiled", "Date Filed", "CreatedAt"], 12, "")),
+    getCell(meta, row, ["BranchManagerReviewedBy", "Branch Manager Reviewed By"], 13, ""),
+    getCell(meta, row, ["SavingsCreditApprovedBy", "Savings Credit Approved By", "ApprovedBy"], 14, ""),
+    getCell(meta, row, ["Notes", "Remarks"], 15, ""),
+    parseAttachments(getCell(meta, row, ["Attachments"], 16, ""))
+  ];
+}
+
+function getKaramayClaims() {
+  try {
+    const meta = getSheetMetadata(SHEETS.karamayClaims, KARAMAY_CLAIM_HEADERS);
+    const rows = [KARAMAY_CLAIM_HEADERS];
+
+    for (let i = 1; i < meta.rows.length; i++) {
+      const claimId = getCell(meta, meta.rows[i], ["ClaimID", "Claim ID", "ID", "RequestID"], 0, "");
+      if (!claimId) continue;
+      rows.push(karamayClaimRowToLegacy(meta, meta.rows[i]));
+    }
+
+    return rows;
+  } catch (err) {
+    console.error("getKaramayClaims error:", err);
+    return [KARAMAY_CLAIM_HEADERS];
+  }
+}
+
+function createKaramayClaim(data) {
+  try {
+    return withScriptLock(function() {
+      const meta = getSheetMetadata(SHEETS.karamayClaims, KARAMAY_CLAIM_HEADERS);
+      const claimId = data.request_id || "KRM-" + new Date().getTime();
+      const actor = firstPresent(data.tellerName, data.tellerEmail);
+      const branchId = firstPresent(data.memberBranchId, data.branchid, data.tellerBranchId);
+      const attachments = Array.isArray(data.attachments) ? data.attachments : [];
+      const modeOfRelease = firstPresent(data.modeOfRelease, data.mode_of_release, data.ModeOfRelease, "Actual Delivery (Bouquet and Cash)");
+
+      if (!data.memberName || !branchId || !data.memberAddress || !data.dateOfDeath) {
+        return { success: false, message: "Please complete the deceased member information." };
+      }
+
+      if (!data.beneficiaryName || !data.relationship || !data.beneficiaryAddress || !data.contactNumber) {
+        return { success: false, message: "Please complete the beneficiary/requestor information." };
+      }
+
+      if (attachments.length < 2) {
+        return { success: false, message: "Please upload the death certificate and valid ID attachments." };
+      }
+
+      appendObjectRow(meta.sheet, meta, {
+        ClaimID: claimId,
+        MemberName: data.memberName || "",
+        MemberBranchId: branchId,
+        MemberAddress: data.memberAddress || "",
+        DateOfDeath: data.dateOfDeath || "",
+        BeneficiaryName: data.beneficiaryName || "",
+        Relationship: data.relationship || "",
+        BeneficiaryAddress: data.beneficiaryAddress || "",
+        ContactNumber: data.contactNumber || "",
+        ModeOfRelease: modeOfRelease,
+        Status: "Pending",
+        EncodedBy: actor,
+        DateStamp: new Date(),
+        BranchManagerReviewedBy: "",
+        SavingsCreditApprovedBy: "",
+        Notes: "",
+        Attachments: JSON.stringify(attachments)
+      });
+
+      return { success: true, request_id: claimId, claimID: claimId };
+    });
+  } catch (err) {
+    return { success: false, message: "Error: " + err.toString() };
+  }
+}
+
 function createRequest(data) {
   try {
     return withScriptLock(function() {
@@ -608,9 +734,13 @@ function updateStatus(data) {
     console.log("updateStatus called with data:", data);
     
     return withScriptLock(function() {
-      const meta = getSheetMetadata(SHEETS.claims, CLAIM_HEADERS);
-      console.log("Retrieved metadata, rows count:", meta.rows.length);
-      
+      const role = normalizeRole(data.role);
+      const isKaramayClaim = String(data.request_id || "").startsWith("KRM");
+      const sheetName = isKaramayClaim ? SHEETS.karamayClaims : SHEETS.claims;
+      const headers = isKaramayClaim ? KARAMAY_CLAIM_HEADERS : CLAIM_HEADERS;
+      const meta = getSheetMetadata(sheetName, headers);
+      console.log("Using sheet:", sheetName, "headers count:", headers.length);
+
       const found = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, data.request_id);
       console.log("findRowByValue result:", found);
 
@@ -618,31 +748,42 @@ function updateStatus(data) {
         return { success: false, message: "Claim not found." };
       }
 
-      const role = normalizeRole(data.role);
-      console.log("Normalized role:", role);
-      
       const updates = {
         Status: data.status || ""
       };
 
-      if (role === "branch_manager") {
-        updates.VerifiedBy = firstPresent(data.branchManagerName, data.branchManagerEmail);
-      }
+      if (isKaramayClaim) {
+        if (role === "branch_manager" || role === "membership_specialist") {
+          updates.BranchManagerReviewedBy = firstPresent(data.branchManagerName, data.branchManagerEmail, data.financeManagerName, data.financeManagerEmail);
+        }
 
-      if (role === "membership_specialist") {
-        updates.VerifiedBy = firstPresent(data.financeManagerName, data.financeManagerEmail);
-      }
+        if (role === "savings_credit_head" && (data.status === "Approved" || data.status === "Rejected")) {
+          updates.SavingsCreditApprovedBy = firstPresent(data.financeManagerName, data.financeManagerEmail);
+        }
 
-      if (role === "finance_head") {
-        updates.FinanceCheckedBy = firstPresent(data.financeManagerName, data.financeManagerEmail);
-      }
+        if (data.notes !== undefined) {
+          updates.Notes = data.notes || "";
+        }
+      } else {
+        if (role === "branch_manager") {
+          updates.VerifiedBy = firstPresent(data.branchManagerName, data.branchManagerEmail);
+        }
 
-      if (role === "savings_credit_head" && (data.status === "Approved" || data.status === "Rejected")) {
-        updates.ApprovedBy = firstPresent(data.financeManagerName, data.financeManagerEmail);
-      }
+        if (role === "membership_specialist") {
+          updates.VerifiedBy = firstPresent(data.financeManagerName, data.financeManagerEmail);
+        }
 
-      if (data.notes !== undefined) {
-        updates.Notes = data.notes || "";
+        if (role === "finance_head") {
+          updates.FinanceCheckedBy = firstPresent(data.financeManagerName, data.financeManagerEmail);
+        }
+
+        if (role === "savings_credit_head" && (data.status === "Approved" || data.status === "Rejected")) {
+          updates.ApprovedBy = firstPresent(data.financeManagerName, data.financeManagerEmail);
+        }
+
+        if (data.notes !== undefined) {
+          updates.Notes = data.notes || "";
+        }
       }
 
       console.log("Updates to apply:", updates);
@@ -692,6 +833,10 @@ function login(email, password) {
     const normalizedEmail = normalizeEmail(email);
     const normalizedPassword = normalizeValue(password);
 
+    const sheetName = meta && meta.sheet ? meta.sheet.getName() : SHEETS.users;
+    const rowCount = meta && Array.isArray(meta.rows) ? meta.rows.length : 0;
+    const headerRow = meta && Array.isArray(meta.headers) ? meta.headers.join(" | ") : "";
+
     for (let i = 1; i < meta.rows.length; i++) {
       const row = meta.rows[i];
       const rowEmail = normalizeEmail(getCell(meta, row, ["Email", "User", "Username"], 0, ""));
@@ -714,7 +859,16 @@ function login(email, password) {
       }
     }
 
-    return { success: false, message: "Invalid email or password." };
+    return {
+      success: false,
+      message: "Invalid email or password.",
+      debug: {
+        sheetName: sheetName,
+        rowCount: rowCount,
+        headers: headerRow,
+        searchedEmail: normalizedEmail
+      }
+    };
   } catch (err) {
     return { success: false, message: "Login error: " + err.toString() };
   }
@@ -1293,6 +1447,10 @@ function handleAction(data) {
       return getRequests();
     case "updateStatus":
       return updateStatus(data);
+    case "createKaramayClaim":
+      return createKaramayClaim(data);
+    case "getKaramayClaims":
+      return getKaramayClaims();
     case "getDashboardCounts":
       return getDashboardCounts();
     case "getSettings":

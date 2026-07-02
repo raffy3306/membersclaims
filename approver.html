@@ -44,6 +44,9 @@ if (approverRole !== "savings_credit_head") {
       <button class="sidebar-btn" onclick="navigateToFinance('audit')">
         <span class="icon">&#128203;</span> Audit Logs
       </button>
+      <button class="sidebar-btn" onclick="navigateToFinance('karamay')">
+        <span class="icon">🧾</span> Karamay Claims
+      </button>
     </div>
 
     <div class="sidebar-bottom">
@@ -169,6 +172,35 @@ if (approverRole !== "savings_credit_head") {
           <tbody id="auditTable">
             <tr><td colspan="5" style="text-align: center; padding: 20px; color: #999;">Audit logs will appear here</td></tr>
           </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="karamayView" style="display: none;">
+      <div class="table-container">
+        <div class="table-header">
+          <div>
+            <h3>Karamay Claims</h3>
+            <p style="color: #888; margin-top: 5px;">Review and inspect Karamay claims submitted by CRS</p>
+          </div>
+          <div class="table-controls">
+            <button class="btn blue" onclick="loadKaramayClaims()">Refresh</button>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>CLAIM NO.</th>
+              <th>MEMBER NAME</th>
+              <th>BRANCH ID</th>
+              <th>MODE OF RELEASE</th>
+              <th>BENEFICIARY</th>
+              <th>STATUS</th>
+              <th>DATE</th>
+              <th>ACTIONS</th>
+            </tr>
+          </thead>
+          <tbody id="karamayTable"></tbody>
         </table>
       </div>
     </div>

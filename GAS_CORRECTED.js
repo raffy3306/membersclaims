@@ -413,40 +413,68 @@ function getRequests(data) {
 
 // 🔄 UPDATE STATUS
 function updateStatus(data) {
-  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName("Hospitalization Claims");
+  const isKaramayClaim = String(data.request_id || "").startsWith("KRM");
+  const sheetName = isKaramayClaim ? "Karamay Claims" : "Hospitalization Claims";
+  const sheet = SpreadsheetApp.openById(SHEET_ID).getSheetByName(sheetName);
   const rows = sheet.getDataRange().getValues();
 
   for (let i = 1; i < rows.length; i++) {
     if (rows[i][0] === data.request_id) {
-      // Update Status (column 8 = index 7)
-      sheet.getRange(i + 1, 8).setValue(data.status);
+      if (isKaramayClaim) {
+        const statusColumn = 11; // Status column by header position in Karamay Claims
+        const branchReviewerColumn = 14; // BranchManagerReviewedBy
+        const savingsApproverColumn = 15; // SavingsCreditApprovedBy
+        const notesColumn = 16; // Notes
+        const dateStampColumn = 13; // DateStamp
 
-      // Update based on role
-      if (data.role === "branch_manager") {
-        // Branch Manager sets VerifiedBy (column 10 = index 9)
-        sheet.getRange(i + 1, 10).setValue(data.branchManagerName || data.branchManagerEmail);
-      } else if (data.role === "membership_specialist") {
-        // Membership Specialist sets VerifiedBy (column 10 = index 9)
-        sheet.getRange(i + 1, 10).setValue(data.financeManagerName || data.financeManagerEmail);
-      } else if (data.role === "finance_head") {
-        // Finance Head sets FinanceCheckedBy (column 16 = index 15)
-        sheet.getRange(i + 1, 16).setValue(data.financeManagerName || data.financeManagerEmail);
-      } else if (data.role === "savings_credit_head") {
-        // Savings & Credit Head sets ApprovedBy (column 11 = index 10)
-        if (data.status === "Approved" || data.status === "Rejected") {
-          sheet.getRange(i + 1, 11).setValue(data.financeManagerName || data.financeManagerEmail);
-        } else {
-          // Clear ApprovedBy when not final status
-          sheet.getRange(i + 1, 11).setValue("");
+        sheet.getRange(i + 1, statusColumn).setValue(data.status);
+
+        if (data.role === "branch_manager" || data.role === "membership_specialist") {
+          sheet.getRange(i + 1, branchReviewerColumn).setValue(data.branchManagerName || data.branchManagerEmail || data.financeManagerName || data.financeManagerEmail);
+        } else if (data.role === "savings_credit_head") {
+          if (data.status === "Approved" || data.status === "Rejected") {
+            sheet.getRange(i + 1, savingsApproverColumn).setValue(data.financeManagerName || data.financeManagerEmail);
+          } else {
+            sheet.getRange(i + 1, savingsApproverColumn).setValue("");
+          }
         }
-      }
 
-      // Update DateStamp (column 12 = index 11)
-      sheet.getRange(i + 1, 12).setValue(data.dateStamp || new Date().toLocaleString());
+        sheet.getRange(i + 1, dateStampColumn).setValue(data.dateStamp || new Date().toLocaleString());
 
-      // Update Notes (column 15 = index 14)
-      if (typeof data.notes !== "undefined") {
-        sheet.getRange(i + 1, 15).setValue(data.notes || "");
+        if (typeof data.notes !== "undefined") {
+          sheet.getRange(i + 1, notesColumn).setValue(data.notes || "");
+        }
+      } else {
+        // Update Status (column 8 = index 7)
+        sheet.getRange(i + 1, 8).setValue(data.status);
+
+        // Update based on role
+        if (data.role === "branch_manager") {
+          // Branch Manager sets VerifiedBy (column 10 = index 9)
+          sheet.getRange(i + 1, 10).setValue(data.branchManagerName || data.branchManagerEmail);
+        } else if (data.role === "membership_specialist") {
+          // Membership Specialist sets VerifiedBy (column 10 = index 9)
+          sheet.getRange(i + 1, 10).setValue(data.financeManagerName || data.financeManagerEmail);
+        } else if (data.role === "finance_head") {
+          // Finance Head sets FinanceCheckedBy (column 16 = index 15)
+          sheet.getRange(i + 1, 16).setValue(data.financeManagerName || data.financeManagerEmail);
+        } else if (data.role === "savings_credit_head") {
+          // Savings & Credit Head sets ApprovedBy (column 11 = index 10)
+          if (data.status === "Approved" || data.status === "Rejected") {
+            sheet.getRange(i + 1, 11).setValue(data.financeManagerName || data.financeManagerEmail);
+          } else {
+            // Clear ApprovedBy when not final status
+            sheet.getRange(i + 1, 11).setValue("");
+          }
+        }
+
+        // Update DateStamp (column 12 = index 11)
+        sheet.getRange(i + 1, 12).setValue(data.dateStamp || new Date().toLocaleString());
+
+        // Update Notes (column 15 = index 14)
+        if (typeof data.notes !== "undefined") {
+          sheet.getRange(i + 1, 15).setValue(data.notes || "");
+        }
       }
 
       return { success: true };

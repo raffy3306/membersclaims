@@ -181,6 +181,54 @@ alter table public.hcattachments add column if not exists created_at timestamptz
 create index if not exists hcattachments_claim_idx
   on public.hcattachments (claim_id);
 
+create table if not exists public.karamayclaims (
+  claim_id text primary key,
+  date_filed timestamptz not null default now(),
+  member_name text not null,
+  member_branch_id text not null,
+  member_address text not null,
+  date_of_death date not null,
+  beneficiary_name text not null,
+  relationship text not null,
+  beneficiary_address text not null,
+  contact_number text not null,
+  claim_status text not null default 'Pending',
+  status text not null default 'Pending',
+  encoded_by text default '',
+  branch_manager_reviewed_by text default '',
+  savings_credit_approved_by text default '',
+  remarks text default '',
+  attachments jsonb not null default '[]'::jsonb,
+  last_updated timestamptz not null default now(),
+  last_updated_by text default ''
+);
+
+alter table public.karamayclaims add column if not exists claim_id text;
+alter table public.karamayclaims add column if not exists date_filed timestamptz default now();
+alter table public.karamayclaims add column if not exists member_name text;
+alter table public.karamayclaims add column if not exists member_branch_id text;
+alter table public.karamayclaims add column if not exists member_address text;
+alter table public.karamayclaims add column if not exists date_of_death date;
+alter table public.karamayclaims add column if not exists beneficiary_name text;
+alter table public.karamayclaims add column if not exists relationship text;
+alter table public.karamayclaims add column if not exists beneficiary_address text;
+alter table public.karamayclaims add column if not exists contact_number text;
+alter table public.karamayclaims add column if not exists claim_status text default 'Pending';
+alter table public.karamayclaims add column if not exists status text default 'Pending';
+alter table public.karamayclaims add column if not exists encoded_by text default '';
+alter table public.karamayclaims add column if not exists branch_manager_reviewed_by text default '';
+alter table public.karamayclaims add column if not exists savings_credit_approved_by text default '';
+alter table public.karamayclaims add column if not exists remarks text default '';
+alter table public.karamayclaims add column if not exists attachments jsonb default '[]'::jsonb;
+alter table public.karamayclaims add column if not exists last_updated timestamptz default now();
+alter table public.karamayclaims add column if not exists last_updated_by text default '';
+
+create index if not exists karamayclaims_status_idx
+  on public.karamayclaims (claim_status);
+
+create index if not exists karamayclaims_branch_idx
+  on public.karamayclaims (member_branch_id);
+
 create table if not exists public.app_settings (
   key text primary key,
   value text default '',
@@ -231,5 +279,6 @@ grant select, insert, update, delete on public.hospitals to anon, authenticated;
 grant select, insert, update, delete on public.segmentation_rates to anon, authenticated;
 grant select, insert, update, delete on public.hospitalizationclaims to anon, authenticated;
 grant select, insert, update, delete on public.hcattachments to anon, authenticated;
+grant select, insert, update, delete on public.karamayclaims to anon, authenticated;
 grant select, insert, update, delete on public.app_settings to anon, authenticated;
 grant usage, select on all sequences in schema public to anon, authenticated;

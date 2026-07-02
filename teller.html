@@ -28,13 +28,16 @@ if (!["crs", "teller", "encoder"].includes(localStorage.getItem("role"))) {
 
     <div class="sidebar-main">
       <button class="sidebar-btn active" onclick="navigateToTeller('entry')">
-        <span class="icon">&#128221;</span> Claim Encoding
+        <span class="icon">&#128221;</span> Hospitalization Claims
+      </button>
+      <button class="sidebar-btn" onclick="navigateToTeller('karamay')">
+        <span class="icon">&#129309;</span> Karamay Claims
       </button>
       <button class="sidebar-btn" onclick="navigateToTeller('submissions')">
-        <span class="icon">📄</span> My Submissions
+        <span class="icon">📄</span> My Hospitalization Submissions
       </button>
       <button class="sidebar-btn" onclick="navigateToTeller('history')">
-        <span class="icon">&#128338;</span> Claim History
+        <span class="icon">&#128338;</span> Hospitalization Claim History
       </button>
     </div>
 
@@ -119,6 +122,34 @@ if (!["crs", "teller", "encoder"].includes(localStorage.getItem("role"))) {
             </tr>
           </thead>
           <tbody id="tellerTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <!-- KARAMAY CLAIMS VIEW -->
+    <div id="karamayView" style="display: none;">
+      <div class="table-container" style="margin-bottom: 24px;">
+        <div class="table-header">
+          <div>
+            <h3>Karamay Claims</h3>
+            <p class="table-count">Encode deceased member and beneficiary details, then forward to Branch Manager for review.</p>
+          </div>
+        </div>
+
+        <table>
+          <thead>
+            <tr>
+              <th>REQUEST NO.</th>
+              <th>DECEASED MEMBER</th>
+              <th>BENEFICIARY</th>
+              <th>RELATIONSHIP</th>
+              <th>DATE OF DEATH</th>
+              <th>STATUS</th>
+              <th>DATE FILED</th>
+              <th>ACTIONS</th>
+            </tr>
+          </thead>
+          <tbody id="karamayTable"></tbody>
         </table>
       </div>
     </div>
@@ -296,6 +327,85 @@ if (!["crs", "teller", "encoder"].includes(localStorage.getItem("role"))) {
     <div class="modal-footer">
       <button class="btn" onclick="closeRequestModal()">Close</button>
       <button id="requestSubmitButton" class="btn blue" onclick="submitRequest()">Submit Claim</button>
+    </div>
+  </div>
+</div>
+
+<!-- KARAMAY CLAIM ENCODING MODAL -->
+<div class="modal" id="karamayModal">
+  <div class="modal-content modal-lg">
+    <div class="modal-header">
+      <h3>Karamay Claim Encoding</h3>
+      <button class="modal-close" onclick="closeKaramayModal()">✕</button>
+    </div>
+    <div class="modal-body">
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px;">
+        <div>
+          <h4 style="margin: 0 0 16px 0;">Member Information (Deceased Member)</h4>
+          <div style="display: grid; gap: 14px;">
+            <div>
+              <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Name</label>
+              <input id="karamayMemberName" placeholder="Enter deceased member name" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            </div>
+            <div>
+              <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Branch ID</label>
+              <input id="karamayMemberBranchId" readonly placeholder="CRS branch ID" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; background: #f8fafc;">
+            </div>
+            <div>
+              <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Address</label>
+              <textarea id="karamayMemberAddress" rows="3" placeholder="Enter deceased member address" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; resize: vertical;"></textarea>
+            </div>
+            <div>
+              <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Date of Death</label>
+              <input id="karamayDateOfDeath" type="date" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            </div>
+          </div>
+        </div>
+
+        <div>
+          <h4 style="margin: 0 0 16px 0;">Beneficiary / Requestor Information</h4>
+          <div style="display: grid; gap: 14px;">
+            <div>
+              <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Name</label>
+              <input id="karamayBeneficiaryName" placeholder="Enter beneficiary or requestor name" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            </div>
+            <div>
+              <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Relationship to the Deceased</label>
+              <input id="karamayRelationship" placeholder="Example: Spouse, child, parent" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            </div>
+            <div>
+              <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Address</label>
+              <textarea id="karamayBeneficiaryAddress" rows="3" placeholder="Enter beneficiary or requestor address" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; resize: vertical;"></textarea>
+            </div>
+            <div>
+              <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Contact Number</label>
+              <input id="karamayContactNumber" placeholder="Enter contact number" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+            </div>
+            <div>
+              <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Mode of Release</label>
+              <select id="karamayModeOfRelease" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; background: #fff;">
+                <option value="Actual Delivery (Bouquet and Cash)">Actual Delivery (Bouquet and Cash)</option>
+                <option value="P2,000.00 Cash Equivalent">P2,000.00 Cash Equivalent</option>
+              </select>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px;">
+        <div>
+          <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Certified True Copy of Death Certificate</label>
+          <input id="karamayDeathCertificate" type="file" accept="image/*,.pdf" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+        </div>
+        <div>
+          <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Photocopy of Valid ID of Beneficiary / Requestor</label>
+          <input id="karamayValidId" type="file" accept="image/*,.pdf" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+        </div>
+      </div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" onclick="closeKaramayModal()">Close</button>
+      <button class="btn blue" onclick="submitKaramayClaim()">Forward to Branch Manager</button>
     </div>
   </div>
 </div>

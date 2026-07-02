@@ -28,16 +28,17 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
     
     <div class="sidebar-main">
       <button class="sidebar-btn active" onclick="navigateToBranch('review')">
-        <span class="icon">&#9989;</span> Verify Claims
+        <span class="icon">&#9989;</span> Verify Hospitalization Claims
         <span class="badge-count" id="reviewBadge">0</span>
       </button>
       <button class="sidebar-btn" onclick="navigateToBranch('dashboard')">
         <span class="icon">📊</span> Dashboard
       </button>
       <button class="sidebar-btn" onclick="navigateToBranch('submitted')">
-        <span class="icon">&#128193;</span> Verified Claims
-      </button>
-    </div>
+        <span class="icon">&#128193;</span> Verified Hospitalization Claims
+      </button>      <button class="sidebar-btn" onclick="navigateToBranch('karamay')">
+        <span class="icon">🧾</span> Karamay Claims
+      </button>    </div>
 
     <div class="sidebar-more">
       <button class="sidebar-btn" onclick="navigateToBranch('notifications')">
@@ -190,6 +191,35 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
             </tr>
           </thead>
           <tbody id="submittedTable"></tbody>
+        </table>
+      </div>
+    </div>
+
+    <div id="karamayView" style="display: none;">
+      <div class="table-container">
+        <div class="table-header">
+          <div>
+            <h3>Karamay Claims</h3>
+            <p class="table-count" id="karamayCount">0 claims</p>
+          </div>
+          <div class="table-controls">
+            <button class="btn blue" onclick="loadKaramayClaims()">Refresh</button>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>CLAIM NO.</th>
+              <th>MEMBER NAME</th>
+              <th>BRANCH ID</th>
+              <th>MODE OF RELEASE</th>
+              <th>BENEFICIARY</th>
+              <th>STATUS</th>
+              <th>DATE</th>
+              <th>ACTIONS</th>
+            </tr>
+          </thead>
+          <tbody id="karamayTable"></tbody>
         </table>
       </div>
     </div>

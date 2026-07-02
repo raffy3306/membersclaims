@@ -148,6 +148,7 @@ body.login-page {
 .sidebar-btn[onclick*="navigateToAdmin('users')"] .icon,
 .sidebar-btn[onclick*="navigateToAdmin('settings')"] .icon,
 .sidebar-btn[onclick*="navigateToTeller('entry')"] .icon,
+.sidebar-btn[onclick*="navigateToTeller('karamay')"] .icon,
 .sidebar-btn[onclick*="navigateToTeller('submissions')"] .icon,
 .sidebar-btn[onclick*="navigateToTeller('history')"] .icon,
 .sidebar-btn[onclick*="navigateToTeller('notifications')"] .icon,
@@ -173,6 +174,7 @@ body.login-page {
 .sidebar-btn[onclick*="navigateToBranch('settings')"] .icon::before,
 .sidebar-btn[onclick*="navigateToFinance('settings')"] .icon::before { content: "\2699"; }
 .sidebar-btn[onclick*="navigateToTeller('entry')"] .icon::before { content: "\1F4DD"; }
+.sidebar-btn[onclick*="navigateToTeller('karamay')"] .icon::before { content: "\1F91D"; }
 .sidebar-btn[onclick*="navigateToTeller('submissions')"] .icon::before { content: "\1F4C4"; }
 .sidebar-btn[onclick*="navigateToTeller('history')"] .icon::before { content: "\1F552"; }
 .sidebar-btn[onclick*="navigateToTeller('notifications')"] .icon::before,
@@ -581,10 +583,14 @@ tbody tr:last-child td {
   justify-content: center;
   align-items: center;
   z-index: 1000;
+  pointer-events: none;
+  opacity: 0;
 }
 
 .modal.active {
   display: flex;
+  pointer-events: auto;
+  opacity: 1;
 }
 
 .modal-content {
