@@ -1,4 +1,4 @@
-const API = "https://script.google.com/macros/s/AKfycbyGK390l-NGN3h8z_DpjetSU9NW2meIXSUUxRPMxENBunfCt6msVCsilw04ApC9eGhlfg/exec";
+const API = "https://script.google.com/macros/s/AKfycbzbIFyvoYjuG9OvJVF1TCjHBt8gdtzkZJYRr5zN_u9dL449dqXZeqF1ZNYvTax3Znzjzg/exec";
 // Apps Script web apps reject CORS preflight OPTIONS requests, so POST JSON as plain text.
 const APPS_SCRIPT_JSON_HEADERS = { "Content-Type": "text/plain;charset=utf-8" };
 
@@ -57,7 +57,7 @@ const STATUS_LABELS = {
   "Under Verification": "For Membership Specialist Review",
   "Under Review": "For Finance Review",
   Forwarded: "For Approval",
-  Returned: "Returned for Correction",
+  Returned: "Returned",
   Approved: "Approved",
   Rejected: "Rejected"
 };
@@ -186,6 +186,9 @@ function callAppsScriptJsonp(payload, timeoutMs = 30000) {
     const url = new URL(API);
     let timeoutId;
 
+    console.log("callAppsScriptJsonp payload", payload);
+    console.log("callAppsScriptJsonp URL", API);
+
     function cleanup() {
       clearTimeout(timeoutId);
       delete window[callbackName];
@@ -194,6 +197,7 @@ function callAppsScriptJsonp(payload, timeoutMs = 30000) {
 
     window[callbackName] = data => {
       cleanup();
+      console.log("callAppsScriptJsonp callback data", data);
       resolve(data);
     };
 
@@ -639,6 +643,58 @@ async function supabaseCreateKaramayClaim(data) {
   return { success: true, request_id: request.claim_id };
 }
 
+async function supabaseEditKaramayClaim(data) {
+  const db = getSupabaseClient();
+  const requestId = data.request_id;
+
+  if (!requestId) {
+    return { success: false, message: "Karamay request ID is required." };
+  }
+
+  const { data: existing, error: findError } = await db
+    .from(SUPABASE_TABLES.karamayClaims)
+    .select("claim_id,claim_status,status")
+    .eq("claim_id", requestId)
+    .maybeSingle();
+
+  if (findError) throw findError;
+  if (!existing) return { success: false, message: "Karamay claim not found." };
+
+  const currentStatus = String(existing.claim_status || existing.status || "").trim();
+  if (!currentStatus.toLowerCase().includes("return")) {
+    return { success: false, message: "Only returned Karamay claims can be edited." };
+  }
+
+  const updates = {
+    member_name: data.memberName || "",
+    member_branch_id: data.memberBranchId || data.branchid || "",
+    member_address: data.memberAddress || "",
+    date_of_death: data.dateOfDeath || null,
+    beneficiary_name: data.beneficiaryName || "",
+    relationship: data.relationship || "",
+    beneficiary_address: data.beneficiaryAddress || "",
+    contact_number: data.contactNumber || "",
+    mode_of_release: data.modeOfRelease || "Actual Delivery (Bouquet and Cash)",
+    claim_status: "Pending",
+    status: "Pending",
+    branch_manager_reviewed_by: "",
+    savings_credit_approved_by: "",
+    remarks: "",
+    attachments: Array.isArray(data.attachments) ? data.attachments : [],
+    last_updated: new Date().toISOString(),
+    last_updated_by: data.tellerEmail || data.tellerName || ""
+  };
+
+  const { error } = await db
+    .from(SUPABASE_TABLES.karamayClaims)
+    .update(updates)
+    .eq("claim_id", requestId);
+
+  if (error) throw error;
+
+  return { success: true };
+}
+
 async function supabaseCreateRequest(data) {
   const db = getSupabaseClient();
   const days = calculateHospitalDays(data.dateAdmitted, data.dateDischarged);
@@ -752,7 +808,10 @@ async function supabaseEditRequest(data) {
 
   if (findError) throw findError;
   if (!existing) return { success: false, message: "Request not found." };
-  if ((existing.claim_status || existing.status) !== "Returned") {
+  const currentStatus = String(existing.claim_status || existing.status || "").trim();
+  const currentNormalized = normalizeValue(currentStatus);
+  const isReturned = currentNormalized.includes("return");
+  if (!isReturned) {
     return { success: false, message: "Only returned requests can be edited." };
   }
 
@@ -1184,6 +1243,8 @@ async function handleSupabaseAction(payload) {
       return supabaseUpdateStatus(payload);
     case "createKaramayClaim":
       return supabaseCreateKaramayClaim(payload);
+    case "editKaramayClaim":
+      return supabaseEditKaramayClaim(payload);
     case "getKaramayClaims":
       return supabaseGetKaramayClaims(payload);
     case "getDashboardCounts":
@@ -1247,6 +1308,8 @@ let allMembers = [];
 let allBranches = [];
 let allHospitals = [];
 let allKaramayClaims = [KARAMAY_CLAIM_HEADERS];
+let editingKaramayClaimId = null;
+let editingKaramayClaimAttachments = [];
 let segmentationRates = {};
 let editingUserEmail = null;
 
@@ -1336,6 +1399,7 @@ function fetchWithTimeout(input, init = {}, timeoutMs = 30000, timeoutMessage = 
 }
 
 async function login() {
+  console.log("login() clicked");
   const email = document.getElementById("email").value.trim();
   const password = document.getElementById("password").value;
   const loginButton = document.getElementById("loginButton");
@@ -1358,7 +1422,7 @@ async function login() {
       password
     });
 
-    console.log(data);
+    console.log("login result", data);
 
     if (data.success) {
       if (data.mustChangePassword) {
@@ -1613,6 +1677,47 @@ function closeRequestModal() {
   resetRequestForm();
 }
 
+function populateKaramayClaimForm(row) {
+  if (!Array.isArray(row)) return;
+  editingKaramayClaimId = row[0] || null;
+  editingKaramayClaimAttachments = normalizeAttachments(row[16] || []);
+
+  setInputValue("karamayMemberName", row[1] || "");
+  setInputValue("karamayMemberBranchId", row[2] || localStorage.getItem("branchid") || "");
+  setInputValue("karamayMemberAddress", row[3] || "");
+  setInputValue("karamayDateOfDeath", row[4] || "");
+  setInputValue("karamayBeneficiaryName", row[5] || "");
+  setInputValue("karamayRelationship", row[6] || "");
+  setInputValue("karamayBeneficiaryAddress", row[7] || "");
+  setInputValue("karamayContactNumber", row[8] || "");
+  setInputValue("karamayModeOfRelease", row[9] || "Actual Delivery (Bouquet and Cash)");
+
+  const title = document.querySelector("#karamayModal .modal-header h3");
+  if (title) title.innerText = "Edit Returned Karamay Claim";
+  const submitButton = document.getElementById("karamaySubmitButton");
+  if (submitButton) submitButton.textContent = "Save Changes";
+}
+
+function openEditKaramayClaim(id) {
+  const row = (allKaramayClaims || []).find(item => Array.isArray(item) && String(item[0]) === String(id));
+  const status = String(row?.[10] || "").trim();
+  const isReturned = isReturnedStatus(status);
+  if (!row || !isReturned) return;
+
+  closeAllModals();
+  const modal = document.getElementById("karamayModal");
+  if (!modal) return;
+
+  resetKaramayClaimForm();
+  populateKaramayClaimForm(row);
+  modal.style.display = "flex";
+  modal.style.visibility = "visible";
+  modal.style.opacity = "1";
+  modal.style.pointerEvents = "auto";
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+}
+
 function openKaramayModal() {
   closeAllModals();
   const modal = document.getElementById("karamayModal");
@@ -1851,6 +1956,8 @@ function bindTellerClaimForm() {
 
 function resetRequestForm() {
   editingRequestId = null;
+  const requestIdInput = document.getElementById("requestId");
+  if (requestIdInput) requestIdInput.value = "";
 
   const title = document.getElementById("requestModalTitle");
   const submitButton = document.getElementById("requestSubmitButton");
@@ -1886,6 +1993,8 @@ function populateRequestForm(request) {
   const submitButton = document.getElementById("requestSubmitButton");
 
   editingRequestId = request[0];
+  const requestIdInput = document.getElementById("requestId");
+  if (requestIdInput) requestIdInput.value = String(request[0] || "");
 
   if (title) title.innerText = "Edit Claim Request";
   if (submitButton) submitButton.innerText = "Save Changes";
@@ -1905,11 +2014,16 @@ function populateRequestForm(request) {
   setTextValue("computedDaysConfined", String(request[3] || 0));
   setTextValue("ratePerDay", formatNumber(request[4]));
   setTextValue("totalClaimableAmount", formatNumber(request[5]));
+
+  const attachmentsInput = document.getElementById("requestAttachments");
+  if (attachmentsInput) attachmentsInput.value = "";
 }
 
 function openEditRequest(requestId) {
   const request = allRequests.find(x => Array.isArray(x) && x[0] === requestId);
-  if (!request || request[7] !== "Returned") return;
+  const status = String(request?.[7] || "").trim();
+  const isReturned = isReturnedStatus(status);
+  if (!request || !isReturned) return;
 
   populateRequestForm(request);
 
@@ -1990,36 +2104,51 @@ async function submitRequest() {
     return;
   }
 
-  const action = editingRequestId ? "editRequest" : "createRequest";
+  const requestIdInput = document.getElementById("requestId");
+  let requestId = requestIdInput?.value?.trim() || editingRequestId;
+
+  if (!requestId && editingRequestId) {
+    requestId = editingRequestId;
+    if (requestIdInput) requestIdInput.value = String(editingRequestId);
+  }
+
+  const action = requestId ? "editRequest" : "createRequest";
   const attachments = await readRequestAttachments();
+
+  console.log("submitRequest action", action, "request_id", requestId, "editingRequestId", editingRequestId, "requestIdInput", requestIdInput?.value);
+
+  const payload = {
+    action: action,
+    request_id: requestId,
+    memberID: member.memberID,
+    memberName: member.fullName,
+    gender: member.gender || "",
+    segmentation: segmentation,
+    branch: member.branch,
+    branchName: member.branchName || getBranchName(member.branch),
+    hospitalID: hospital.id,
+    hospitalName: hospital.name,
+    dateAdmitted: dateAdmitted,
+    dateDischarged: dateDischarged,
+    actualDaysConfined: days.actualDays,
+    daysConfined: days.payableDays,
+    dailyRate: dailyRate,
+    claimableAmount: days.payableDays * dailyRate,
+    diagnosis: diagnosis,
+      contactNumber: member.contactNumber || document.getElementById("requestContact")?.value.trim() || "",
+    tellerName: localStorage.getItem("fullname"),
+    tellerEmail: localStorage.getItem("user"),
+    tellerBranchId: member.branch || localStorage.getItem("branchid")
+  };
+
+  if (attachments.length) {
+    payload.attachments = attachments;
+  }
 
   const res = await fetch(API, {
     method: "POST",
     headers: APPS_SCRIPT_JSON_HEADERS,
-    body: JSON.stringify({
-      action: action,
-      request_id: editingRequestId,
-      memberID: member.memberID,
-      memberName: member.fullName,
-      gender: member.gender || "",
-      segmentation: segmentation,
-      branch: member.branch,
-      branchName: member.branchName || getBranchName(member.branch),
-      hospitalID: hospital.id,
-      hospitalName: hospital.name,
-      dateAdmitted: dateAdmitted,
-      dateDischarged: dateDischarged,
-      actualDaysConfined: days.actualDays,
-      daysConfined: days.payableDays,
-      dailyRate: dailyRate,
-      claimableAmount: days.payableDays * dailyRate,
-      diagnosis: diagnosis,
-      contactNumber: member.contactNumber || document.getElementById("requestContact")?.value.trim() || "",
-      tellerName: localStorage.getItem("fullname"),
-      tellerEmail: localStorage.getItem("user"),
-      tellerBranchId: member.branch || localStorage.getItem("branchid"),
-      attachments: attachments
-    })
+    body: JSON.stringify(payload)
   });
   const data = await parseApiJsonResponse(res);
 
@@ -2213,6 +2342,10 @@ let workflowRequestsPromise = null;
 
 function normalizeValue(value) {
   return String(value ?? "").trim().toLowerCase();
+}
+
+function isReturnedStatus(value) {
+  return normalizeValue(value).includes("return");
 }
 
 function parseStoredUserIdentifier() {
@@ -2706,7 +2839,10 @@ function openModal(id) {
       }
     }
 
-    if (role === "crs" && r[7] === "Returned") {
+    const viewStatus = String(r[7] || "").trim();
+    const isReturnedView = isReturnedStatus(viewStatus);
+
+    if (role === "crs" && isReturnedView) {
       const editBtn = document.createElement("button");
       editBtn.className = "btn blue role-action-btn";
       editBtn.style.cssText = "margin-left: auto; margin-right: 10px;";
@@ -4009,7 +4145,7 @@ function getKaramayStatusLabel(status) {
     Pending: "For Branch Manager Review",
     Forwarded: "For Savings and Credit Head Approval",
     Approved: "Approved",
-    Returned: "Returned for Correction",
+    Returned: "Returned",
     Rejected: "Rejected"
   };
   return labels[status] || status || "";
@@ -4052,7 +4188,17 @@ function mergeKaramayClaims(apiData, localData) {
 
 function writeStoredKaramayClaim(row) {
   const rows = readStoredKaramayClaims().slice(1);
-  rows.unshift(row);
+  const claimId = String(row[0] || "").trim();
+  if (!claimId) {
+    rows.unshift(row);
+  } else {
+    const existingIndex = rows.findIndex(existingRow => String(existingRow[0] || "").trim() === claimId);
+    if (existingIndex >= 0) {
+      rows[existingIndex] = row;
+    } else {
+      rows.unshift(row);
+    }
+  }
   localStorage.setItem(KARAMAY_LOCAL_STORAGE_KEY, JSON.stringify(rows));
 }
 
@@ -4081,6 +4227,9 @@ function sortKaramayClaimsNewestFirst(data) {
 }
 
 function resetKaramayClaimForm() {
+  editingKaramayClaimId = null;
+  editingKaramayClaimAttachments = [];
+
   [
     "karamayMemberName",
     "karamayMemberBranchId",
@@ -4094,6 +4243,16 @@ function resetKaramayClaimForm() {
     "karamayDeathCertificate",
     "karamayValidId"
   ].forEach(id => setInputValue(id, ""));
+
+  const deathCertificate = document.getElementById("karamayDeathCertificate");
+  const validId = document.getElementById("karamayValidId");
+  if (deathCertificate) deathCertificate.value = "";
+  if (validId) validId.value = "";
+
+  const title = document.querySelector("#karamayModal .modal-header h3");
+  if (title) title.innerText = "Karamay Claim Encoding";
+  const submitButton = document.getElementById("karamaySubmitButton");
+  if (submitButton) submitButton.textContent = "Forward to Branch Manager";
 }
 
 async function submitKaramayClaim() {
@@ -4104,8 +4263,11 @@ async function submitKaramayClaim() {
     ...validId.map(file => ({ ...file, document_type: "Beneficiary Valid ID" }))
   ];
 
+  const isEdit = Boolean(editingKaramayClaimId);
+  const attachmentsToSend = attachments.length ? attachments : editingKaramayClaimAttachments;
   const payload = {
-    action: "createKaramayClaim",
+    action: isEdit ? "editKaramayClaim" : "createKaramayClaim",
+    request_id: editingKaramayClaimId,
     memberName: getInputTrim("karamayMemberName"),
     memberBranchId: getInputTrim("karamayMemberBranchId") || localStorage.getItem("branchid") || "",
     memberAddress: getInputTrim("karamayMemberAddress"),
@@ -4118,7 +4280,7 @@ async function submitKaramayClaim() {
     tellerName: localStorage.getItem("fullname"),
     tellerEmail: localStorage.getItem("user"),
     branchid: localStorage.getItem("branchid"),
-    attachments
+    attachments: attachmentsToSend
   };
 
   if (!payload.memberName || !payload.memberBranchId || !payload.memberAddress || !payload.dateOfDeath) {
@@ -4131,13 +4293,13 @@ async function submitKaramayClaim() {
     return;
   }
 
-  if (attachments.length < 2) {
+  if (!attachmentsToSend.length) {
     alert("Please upload both required attachments.");
     return;
   }
 
   const localRow = [
-    generateID("KRM"),
+    isEdit ? editingKaramayClaimId : generateID("KRM"),
     payload.memberName,
     payload.memberBranchId,
     payload.memberAddress,
@@ -4153,7 +4315,7 @@ async function submitKaramayClaim() {
     "",
     "",
     "",
-    attachments
+    attachmentsToSend
   ];
 
   try {
@@ -4167,14 +4329,14 @@ async function submitKaramayClaim() {
     if (!data.success) {
       if (shouldUseKaramayLocalFallback(data)) {
         writeStoredKaramayClaim(localRow);
-        alert("Karamay claim saved locally. Deploy the backend update to sync this workflow for other users.");
+        alert(isEdit ? "Karamay claim update saved locally. Deploy the backend update to sync this workflow for other users." : "Karamay claim saved locally. Deploy the backend update to sync this workflow for other users.");
         closeKaramayModal();
       } else {
         alert(data.message || "Failed to submit Karamay claim.");
         return;
       }
     } else {
-      alert("Karamay claim forwarded to Branch Manager for review.");
+      alert(isEdit ? "Karamay claim updated and resubmitted for verification." : "Karamay claim forwarded to Branch Manager for review.");
       closeKaramayModal();
     }
   } catch (err) {
@@ -4239,6 +4401,10 @@ function renderKaramayClaims() {
 
   const html = rows.map(row => {
     const dateFiled = formatDateTimeForDisplay(row[12]);
+    const status = String(row[10] || "").trim();
+    const normalizedStatus = normalizeValue(status);
+    const isReturned = normalizedStatus === "returned" || normalizedStatus === "returnedforcorrection" || normalizedStatus === "returned for correction";
+    const canEdit = getCurrentRole() === "crs" && isReturned;
     return `
       <tr>
         <td>${escapeHtml(row[0])}</td>
@@ -4246,9 +4412,11 @@ function renderKaramayClaims() {
         <td>${escapeHtml(row[5])}</td>
         <td>${escapeHtml(row[6])}</td>
         <td>${escapeHtml(row[4])}</td>
-        <td><span class="${getStatusClass(row[10])}">${escapeHtml(getKaramayStatusLabel(row[10]))}</span></td>
+        <td><span class="${getStatusClass(status)}">${escapeHtml(getKaramayStatusLabel(status))}</span></td>
         <td>${escapeHtml(dateFiled)}</td>
-        <td><button class="btn blue" onclick="openKaramayClaimModal('${escapeHtml(row[0])}')">View</button></td>
+        <td>
+          <button class="btn blue" onclick="openKaramayClaimModal('${escapeHtml(row[0])}')">View</button>
+        </td>
       </tr>
     `;
   }).join("");
@@ -4329,6 +4497,12 @@ function openKaramayClaimModal(id) {
         <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Attachments</label>
         ${attachmentHtml}
       </div>
+      ${status === "Returned" && row[15] ? `
+        <div style="margin-bottom: 20px; padding: 16px; background: #fff4f4; border-left: 4px solid #dc2626; border-radius: 6px;">
+          <label style="font-size: 11px; color: #b91c1c; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Return Notes</label>
+          <p style="margin: 0; font-size: 14px; color: #7f1d1d;">${escapeHtml(row[15])}</p>
+        </div>
+      ` : ``}
     `;
   }
 
@@ -4346,7 +4520,7 @@ function openKaramayClaimModal(id) {
     const role = getCurrentRole();
     const status = String(row[10] || '').trim();
 
-    if ((role === 'branch_manager' || role === 'membership_specialist') && (status === 'Pending' || status === 'Returned')) {
+    if ((role === 'branch_manager' || role === 'membership_specialist') && (status === 'Pending' || isReturnedStatus(status))) {
       const returnBtn = document.createElement('button');
       returnBtn.className = 'btn red role-action-btn';
       returnBtn.style.cssText = 'margin-left: auto; margin-right: 10px;';
@@ -4372,6 +4546,15 @@ function openKaramayClaimModal(id) {
         rejectBtn.className = 'btn red';
         rejectBtn.style.cssText = '';
       }
+    }
+
+    if (role === 'crs' && isReturnedStatus(status)) {
+      const editBtn = document.createElement('button');
+      editBtn.className = 'btn green role-action-btn';
+      editBtn.style.cssText = 'margin-left: auto; margin-right: 10px;';
+      editBtn.textContent = 'Edit';
+      editBtn.onclick = () => openEditKaramayClaim(id);
+      modalFooter.appendChild(editBtn);
     }
 
     if (role === 'crs' && status === 'Approved') {

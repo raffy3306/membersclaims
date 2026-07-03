@@ -577,6 +577,67 @@ function createKaramayClaim(data) {
   }
 }
 
+function editKaramayClaim(data) {
+  try {
+    return withScriptLock(function() {
+      const meta = getSheetMetadata(SHEETS.karamayClaims, KARAMAY_CLAIM_HEADERS);
+      const found = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, data.request_id);
+
+      if (!found) {
+        return { success: false, message: "Claim not found." };
+      }
+
+      const currentStatus = normalizeValue(getCell(meta, found.row, ["Status", "ClaimStatus", "Claim Status"], 10, ""));
+      const isReturned = currentStatus.toLowerCase().includes("return");
+      if (!isReturned) {
+        return { success: false, message: "Only returned claims can be edited." };
+      }
+
+      const existingAttachments = parseAttachments(getCell(meta, found.row, ["Attachments"], 16, ""));
+      const attachments = Array.isArray(data.attachments) ? data.attachments : [];
+      const finalAttachments = attachments.length ? attachments : existingAttachments;
+      const branchId = firstPresent(data.memberBranchId, data.branchid, data.tellerBranchId);
+      const modeOfRelease = firstPresent(data.modeOfRelease, data.mode_of_release, data.ModeOfRelease, "Actual Delivery (Bouquet and Cash)");
+      const actor = firstPresent(data.tellerName, data.tellerEmail);
+
+      if (!data.memberName || !branchId || !data.memberAddress || !data.dateOfDeath) {
+        return { success: false, message: "Please complete the deceased member information." };
+      }
+
+      if (!data.beneficiaryName || !data.relationship || !data.beneficiaryAddress || !data.contactNumber) {
+        return { success: false, message: "Please complete the beneficiary/requestor information." };
+      }
+
+      if (!attachments.length) {
+        return { success: false, message: "Please upload the death certificate and valid ID attachments." };
+      }
+
+      const updates = {
+        MemberName: data.memberName || "",
+        MemberBranchId: branchId,
+        MemberAddress: data.memberAddress || "",
+        DateOfDeath: data.dateOfDeath || "",
+        BeneficiaryName: data.beneficiaryName || "",
+        Relationship: data.relationship || "",
+        BeneficiaryAddress: data.beneficiaryAddress || "",
+        ContactNumber: data.contactNumber || "",
+        ModeOfRelease: modeOfRelease,
+        Status: "Pending",
+        EncodedBy: actor,
+        BranchManagerReviewedBy: "",
+        SavingsCreditApprovedBy: "",
+        Notes: "",
+        Attachments: JSON.stringify(attachments)
+      };
+
+      setObjectFields(meta.sheet, found.rowNumber, meta, updates);
+      return { success: true };
+    });
+  } catch (err) {
+    return { success: false, message: "Error: " + err.toString() };
+  }
+}
+
 function createRequest(data) {
   try {
     return withScriptLock(function() {
@@ -661,8 +722,9 @@ function editRequest(data) {
         return { success: false, message: "Claim not found." };
       }
 
-      const currentStatus = normalizeValue(getCell(meta, found.row, ["Status", "ClaimStatus", "Claim Status"], 7, ""));
-      if (currentStatus !== "Returned") {
+      const currentStatus = normalizeValue(getCell(meta, found.row, ["Status", "ClaimStatus", "Claim Status"], 7, "")).toLowerCase();
+      const isReturned = currentStatus.includes("return");
+      if (!isReturned) {
         return { success: false, message: "Only returned claims can be edited." };
       }
 
@@ -1449,6 +1511,8 @@ function handleAction(data) {
       return updateStatus(data);
     case "createKaramayClaim":
       return createKaramayClaim(data);
+    case "editKaramayClaim":
+      return editKaramayClaim(data);
     case "getKaramayClaims":
       return getKaramayClaims();
     case "getDashboardCounts":
