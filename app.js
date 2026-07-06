@@ -1655,6 +1655,8 @@ async function openRequestModal() {
   resetRequestForm();
   if (modal) {
     modal.style.display = "flex";
+    modal.style.pointerEvents = "auto";
+    modal.style.opacity = "1";
     modal.classList.add("active");
   }
 
@@ -2030,6 +2032,9 @@ function openEditRequest(requestId) {
   const modal = document.getElementById("requestModal");
   if (modal) {
     modal.style.display = "flex";
+    modal.style.pointerEvents = "auto";
+    modal.style.opacity = "1";
+    modal.classList.add("active");
   }
 }
 
