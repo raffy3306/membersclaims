@@ -82,17 +82,37 @@ function login(email, password) {
   return { success: false };
 }
 
+function parsePayload(e) {
+  try {
+    if (e.parameter && e.parameter.payload) {
+      return JSON.parse(e.parameter.payload);
+    }
+  } catch (err) {
+    // Ignore parse error and fallback to raw parameters.
+  }
+  return e.parameter || {};
+}
+
 function doGet(e) {
-  const action = e.parameter.action;
+  const data = parsePayload(e);
+  const action = String(data.action || "").trim();
   let result = {};
 
   if (action === "login") {
-    result = login(e.parameter.email, e.parameter.password);
+    result = login(data.email, data.password);
   }
 
-  return ContentService
-    .createTextOutput(JSON.stringify(result))
-    .setMimeType(ContentService.MimeType.JSON);
+  const callback = String(e.parameter && e.parameter.callback || "").trim();
+  const outputText = callback ? `${callback}(${JSON.stringify(result)})` : JSON.stringify(result);
+  const output = ContentService.createTextOutput(outputText);
+
+  if (callback) {
+    output.setMimeType(ContentService.MimeType.JAVASCRIPT);
+  } else {
+    output.setMimeType(ContentService.MimeType.JSON);
+  }
+
+  return output;
 }
 
 function doPost(e) {
@@ -490,8 +510,10 @@ function editRequest(data) {
 
   for (let i = 1; i < rows.length; i++) {
     if (rows[i][0] === data.request_id) {
-      // Check status is "Returned" (column 8 = index 7)
-      if (String(rows[i][7] || "").trim() !== "Returned") {
+      // Check status is any returned variant (column 8 = index 7)
+      const currentStatus = String(rows[i][7] || "").trim().toLowerCase();
+      const isReturned = currentStatus.includes("return");
+      if (!isReturned) {
         return { success: false, message: "Only returned claims can be edited." };
       }
 

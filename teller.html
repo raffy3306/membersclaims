@@ -248,6 +248,7 @@ if (!["crs", "teller", "encoder"].includes(localStorage.getItem("role"))) {
     </div>
     <div class="modal-body">
       <input id="requestMemberId" type="hidden">
+      <input id="requestId" type="hidden">
       <datalist id="memberOptions"></datalist>
       <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; margin-bottom: 20px;">
         <div>
@@ -405,7 +406,7 @@ if (!["crs", "teller", "encoder"].includes(localStorage.getItem("role"))) {
     </div>
     <div class="modal-footer">
       <button class="btn" onclick="closeKaramayModal()">Close</button>
-      <button class="btn blue" onclick="submitKaramayClaim()">Forward to Branch Manager</button>
+      <button id="karamaySubmitButton" class="btn blue" onclick="submitKaramayClaim()">Forward to Branch Manager</button>
     </div>
   </div>
 </div>

@@ -36,9 +36,11 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
       </button>
       <button class="sidebar-btn" onclick="navigateToBranch('submitted')">
         <span class="icon">&#128193;</span> Verified Hospitalization Claims
-      </button>      <button class="sidebar-btn" onclick="navigateToBranch('karamay')">
+      </button>
+      <button id="karamayMenuButton" class="sidebar-btn" onclick="navigateToBranch('karamay')">
         <span class="icon">🧾</span> Karamay Claims
-      </button>    </div>
+      </button>
+    </div>
 
     <div class="sidebar-more">
       <button class="sidebar-btn" onclick="navigateToBranch('notifications')">
@@ -257,6 +259,17 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
   </div>
 </div>
 
+<script>
+(function() {
+  const role = String(localStorage.getItem("role") || "").trim().toLowerCase();
+  if (role === "verifier") {
+    const karamayButton = document.getElementById("karamayMenuButton");
+    if (karamayButton) {
+      karamayButton.style.display = "none";
+    }
+  }
+})();
+</script>
 <script src="app.js"></script>
 
 <script>

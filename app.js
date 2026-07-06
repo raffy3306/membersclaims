@@ -2869,7 +2869,14 @@ function openModal(id) {
     }
   }
 
-  document.getElementById("modal").style.display = "flex";
+  const modal = document.getElementById("modal");
+  if (modal) {
+    modal.style.display = "flex";
+    modal.style.pointerEvents = "auto";
+    modal.style.opacity = "1";
+    modal.classList.add("active");
+    modal.setAttribute("aria-hidden", "false");
+  }
 }
 
 function approveRequest() {
@@ -4951,7 +4958,14 @@ function openModal(id) {
     }
   }
 
-  document.getElementById("modal").style.display = "flex";
+  const modal = document.getElementById("modal");
+  if (modal) {
+    modal.style.display = "flex";
+    modal.style.pointerEvents = "auto";
+    modal.style.opacity = "1";
+    modal.classList.add("active");
+    modal.setAttribute("aria-hidden", "false");
+  }
 }
 
 async function loadBranchTable() {
