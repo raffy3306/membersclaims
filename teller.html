@@ -421,3 +421,9 @@ initializeTellerPage();
 
 </body>
 </html>
+
+<!-- Hidden iframe and form for Apps Script form POST fallback (avoids CORS preflight) -->
+<iframe name="karamayUploadTarget" id="karamayUploadTarget" style="display:none"></iframe>
+<form id="karamayUploadForm" method="POST" target="karamayUploadTarget" style="display:none">
+  <input type="hidden" name="payload" id="karamayUploadPayload">
+</form>

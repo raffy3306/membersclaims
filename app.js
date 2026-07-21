@@ -4349,6 +4349,24 @@ async function submitKaramayClaim() {
     return found;
   }
 
+  async function attemptFormPost() {
+    const form = document.getElementById('karamayUploadForm');
+    const payloadInput = document.getElementById('karamayUploadPayload');
+    if (!form || !payloadInput) return false;
+    try {
+      payloadInput.value = JSON.stringify(payload);
+      form.action = API;
+      form.submit();
+      // Allow server time to process and refresh local view
+      await wait(1200);
+      await loadKaramayClaims(true);
+      return Array.isArray(allKaramayClaims) && allKaramayClaims.some(row => Array.isArray(row) && String(row[0]) === String(savedRequestId));
+    } catch (err) {
+      console.warn('Form POST fallback failed', err);
+      return false;
+    }
+  }
+
   try {
     const res = await fetch(API, {
       method: "POST",
@@ -4359,10 +4377,16 @@ async function submitKaramayClaim() {
 
     if (!data.success) {
       if (shouldUseKaramayLocalFallback(data)) {
-        const saved = await attemptNoCorsWrite().catch(() => false);
-        if (!saved) {
-          writeStoredKaramayClaim(localRow);
-          alert(isEdit ? "Karamay claim update saved locally. Deploy the backend update to sync this workflow for other users." : "Karamay claim saved locally. Deploy the backend update to sync this workflow for other users.");
+        // Try form POST fallback first (avoids CORS preflight and sends full body)
+        const formSaved = await attemptFormPost().catch(() => false);
+        if (!formSaved) {
+          const saved = await attemptNoCorsWrite().catch(() => false);
+          if (!saved) {
+            writeStoredKaramayClaim(localRow);
+            alert(isEdit ? "Karamay claim update saved locally. Deploy the backend update to sync this workflow for other users." : "Karamay claim saved locally. Deploy the backend update to sync this workflow for other users.");
+          } else {
+            alert(isEdit ? "Karamay claim updated and resubmitted for verification." : "Karamay claim forwarded to Branch Manager for review.");
+          }
         } else {
           alert(isEdit ? "Karamay claim updated and resubmitted for verification." : "Karamay claim forwarded to Branch Manager for review.");
         }
@@ -4376,11 +4400,16 @@ async function submitKaramayClaim() {
       closeKaramayModal();
     }
   } catch (err) {
-    console.warn("Karamay save failed, retrying write without expecting a response:", err);
-    const saved = await attemptNoCorsWrite().catch(() => false);
-    if (!saved) {
-      writeStoredKaramayClaim(localRow);
-      alert("Karamay claim saved locally because the backend could not be reached.");
+    console.warn("Karamay save failed, attempting form POST fallback then no-cors write:", err);
+    const formSaved = await attemptFormPost().catch(() => false);
+    if (!formSaved) {
+      const saved = await attemptNoCorsWrite().catch(() => false);
+      if (!saved) {
+        writeStoredKaramayClaim(localRow);
+        alert("Karamay claim saved locally because the backend could not be reached.");
+      } else {
+        alert(isEdit ? "Karamay claim updated and resubmitted for verification." : "Karamay claim forwarded to Branch Manager for review.");
+      }
     } else {
       alert(isEdit ? "Karamay claim updated and resubmitted for verification." : "Karamay claim forwarded to Branch Manager for review.");
     }

@@ -603,7 +603,7 @@ function editKaramayClaim(data) {
         return { success: false, message: "Please complete the beneficiary/requestor information." };
       }
 
-      if (!attachments.length) {
+      if (!finalAttachments.length) {
         return { success: false, message: "Please upload the death certificate and valid ID attachments." };
       }
 
@@ -622,7 +622,7 @@ function editKaramayClaim(data) {
         BranchManagerReviewedBy: "",
         SavingsCreditApprovedBy: "",
         Notes: "",
-        Attachments: JSON.stringify(attachments)
+        Attachments: JSON.stringify(finalAttachments)
       };
 
       setObjectFields(meta.sheet, found.rowNumber, meta, updates);
@@ -1590,7 +1590,20 @@ function parsePostData(e) {
   const contents = e && e.postData && e.postData.contents ? e.postData.contents : "";
 
   if (contents) {
-    return JSON.parse(contents);
+    try {
+      return JSON.parse(contents);
+    } catch (err) {
+      // If the body is form-encoded (e.g. payload=<json>), prefer the payload parameter
+      if (e && e.parameter && e.parameter.payload) {
+        try {
+          return JSON.parse(e.parameter.payload);
+        } catch (err2) {
+          // fall through
+        }
+      }
+      // As a last resort, return parsed parameters
+      return e && e.parameter ? e.parameter : {};
+    }
   }
 
   return e && e.parameter ? e.parameter : {};
