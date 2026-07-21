@@ -4264,7 +4264,27 @@ async function submitKaramayClaim() {
   ];
 
   const isEdit = Boolean(editingKaramayClaimId);
-  const attachmentsToSend = attachments.length ? attachments : editingKaramayClaimAttachments;
+  let attachmentsToSend;
+  if (attachments.length) {
+    // If editing, merge new attachments with existing ones so unchanged files are preserved.
+    if (isEdit && Array.isArray(editingKaramayClaimAttachments) && editingKaramayClaimAttachments.length) {
+      const map = {};
+      // index existing by document_type when available, else by file_name
+      editingKaramayClaimAttachments.forEach(a => {
+        const key = String(a.document_type || a.file_name || "").trim() || JSON.stringify(a);
+        map[key] = a;
+      });
+      attachments.forEach(a => {
+        const key = String(a.document_type || a.file_name || "").trim() || JSON.stringify(a);
+        map[key] = a;
+      });
+      attachmentsToSend = Object.keys(map).map(k => map[k]);
+    } else {
+      attachmentsToSend = attachments;
+    }
+  } else {
+    attachmentsToSend = editingKaramayClaimAttachments;
+  }
   const payload = {
     action: isEdit ? "editKaramayClaim" : "createKaramayClaim",
     request_id: editingKaramayClaimId,
@@ -4298,8 +4318,9 @@ async function submitKaramayClaim() {
     return;
   }
 
+  const savedRequestId = isEdit ? editingKaramayClaimId : generateID("KRM");
   const localRow = [
-    isEdit ? editingKaramayClaimId : generateID("KRM"),
+    savedRequestId,
     payload.memberName,
     payload.memberBranchId,
     payload.memberAddress,
@@ -4318,6 +4339,16 @@ async function submitKaramayClaim() {
     attachmentsToSend
   ];
 
+  async function attemptNoCorsWrite() {
+    await submitAppsScriptWrite(payload, 45000);
+    await wait(1200);
+    await loadKaramayClaims(true);
+    const found = Array.isArray(allKaramayClaims)
+      ? allKaramayClaims.some(row => Array.isArray(row) && String(row[0]) === String(savedRequestId))
+      : false;
+    return found;
+  }
+
   try {
     const res = await fetch(API, {
       method: "POST",
@@ -4328,8 +4359,13 @@ async function submitKaramayClaim() {
 
     if (!data.success) {
       if (shouldUseKaramayLocalFallback(data)) {
-        writeStoredKaramayClaim(localRow);
-        alert(isEdit ? "Karamay claim update saved locally. Deploy the backend update to sync this workflow for other users." : "Karamay claim saved locally. Deploy the backend update to sync this workflow for other users.");
+        const saved = await attemptNoCorsWrite().catch(() => false);
+        if (!saved) {
+          writeStoredKaramayClaim(localRow);
+          alert(isEdit ? "Karamay claim update saved locally. Deploy the backend update to sync this workflow for other users." : "Karamay claim saved locally. Deploy the backend update to sync this workflow for other users.");
+        } else {
+          alert(isEdit ? "Karamay claim updated and resubmitted for verification." : "Karamay claim forwarded to Branch Manager for review.");
+        }
         closeKaramayModal();
       } else {
         alert(data.message || "Failed to submit Karamay claim.");
@@ -4340,8 +4376,14 @@ async function submitKaramayClaim() {
       closeKaramayModal();
     }
   } catch (err) {
-    writeStoredKaramayClaim(localRow);
-    alert("Karamay claim saved locally because the backend could not be reached.");
+    console.warn("Karamay save failed, retrying write without expecting a response:", err);
+    const saved = await attemptNoCorsWrite().catch(() => false);
+    if (!saved) {
+      writeStoredKaramayClaim(localRow);
+      alert("Karamay claim saved locally because the backend could not be reached.");
+    } else {
+      alert(isEdit ? "Karamay claim updated and resubmitted for verification." : "Karamay claim forwarded to Branch Manager for review.");
+    }
     closeKaramayModal();
   }
 
