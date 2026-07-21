@@ -1,4 +1,4 @@
-const API = "https://script.google.com/macros/s/AKfycbzbIFyvoYjuG9OvJVF1TCjHBt8gdtzkZJYRr5zN_u9dL449dqXZeqF1ZNYvTax3Znzjzg/exec";
+const API = "https://script.google.com/macros/s/AKfycbwJ2XWWIiI83MenTIkaGLpyk0ZOY6emo7huXmLv6iyF8iy1Xz72qflVY69DAPr-UerbaA/exec";
 // Apps Script web apps reject CORS preflight OPTIONS requests, so POST JSON as plain text.
 const APPS_SCRIPT_JSON_HEADERS = { "Content-Type": "text/plain;charset=utf-8" };
 
@@ -1308,6 +1308,7 @@ let allMembers = [];
 let allBranches = [];
 let allHospitals = [];
 let allKaramayClaims = [KARAMAY_CLAIM_HEADERS];
+let karamayClaimsPromise = null;
 let editingKaramayClaimId = null;
 let editingKaramayClaimAttachments = [];
 let segmentationRates = {};
@@ -3019,14 +3020,8 @@ async function loadDashboardCounts() {
   document.getElementById("countReview").innerText = data.review;
 }
 
-async function loadTellerCounts() {
-  const res = await fetch(API, {
-    method: "POST",
-    headers: APPS_SCRIPT_JSON_HEADERS,
-    body: JSON.stringify({ action: "getRequests" })
-  });
-
-  const data = await parseApiJsonResponse(res);
+async function loadTellerCounts(forceRefresh = false) {
+  const data = await loadWorkflowRequests(forceRefresh);
   const tellerEmail = localStorage.getItem("user");
   const tellerFullname = localStorage.getItem("fullname");
 
@@ -3052,15 +3047,8 @@ async function loadTellerCounts() {
   document.getElementById("countApproved").innerText = approved;
 }
 
-async function loadBranchTable() {
-  const res = await fetch(API, {
-    method: "POST",
-    headers: APPS_SCRIPT_JSON_HEADERS,
-    body: JSON.stringify({ action: "getRequests" })
-  });
-
-  const data = sortRequestDataNewestFirst(await parseApiJsonResponse(res));
-  allRequests = data;
+async function loadBranchTable(forceRefresh = false) {
+  const data = await loadWorkflowRequests(forceRefresh);
 
   const branchId = localStorage.getItem("branchid");
   const role = getCurrentRole();
@@ -3104,14 +3092,8 @@ async function loadBranchTable() {
   document.getElementById("branchTable").innerHTML = html;
 }
 
-async function loadBranchCounts() {
-  const res = await fetch(API, {
-    method: "POST",
-    headers: APPS_SCRIPT_JSON_HEADERS,
-    body: JSON.stringify({ action: "getRequests" })
-  });
-
-  const data = await parseApiJsonResponse(res);
+async function loadBranchCounts(forceRefresh = false) {
+  const data = await loadWorkflowRequests(forceRefresh);
   const branchId = localStorage.getItem("branchid");
   const role = getCurrentRole();
 
@@ -3136,16 +3118,8 @@ async function loadBranchCounts() {
   document.getElementById("bmPending").innerText = pending || underVerification;
 }
 
-async function loadFinanceTable() {
-  const res = await fetch(API, {
-    method: "POST",
-    headers: APPS_SCRIPT_JSON_HEADERS,
-    body: JSON.stringify({ action: "getRequests" })
-  });
-
-  const data = sortRequestDataNewestFirst(await parseApiJsonResponse(res));
-  allRequests = data;
-
+async function loadFinanceTable(forceRefresh = false) {
+  await loadWorkflowRequests(forceRefresh);
   renderFinanceTable();
   updateFinanceSummary();
 }
@@ -3319,7 +3293,7 @@ function navigateToFinance(page) {
     } else if (page === 'karamay') {
       headerTitle.innerText = '🧾 Karamay Claims';
       subtitle.innerText = 'Review Karamay claims submitted by CRS';
-      if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="loadKaramayClaims()">Refresh</button>';
+      if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="loadKaramayClaims(true)">Refresh</button>';
     } else {
       headerTitle.innerText = '💜 Savings and Credit Head Approval';
       subtitle.innerText = 'Review requests forwarded by Branch Manager · Approve or reject withdrawal requests';
@@ -3760,13 +3734,8 @@ async function submitUserForm() {
   }
 }
 
-async function loadAdminTable() {
-  const res = await fetch(API, {
-    method: 'POST',
-    body: JSON.stringify({ action: 'getRequests' })
-  });
-  const data = sortRequestDataNewestFirst(await res.json());
-  allRequests = data;
+async function loadAdminTable(forceRefresh = false) {
+  const data = await loadWorkflowRequests(forceRefresh);
 
   let html = '';
   let count = 0;
@@ -3800,13 +3769,8 @@ async function loadAdminTable() {
   if (tableCount) tableCount.innerText = `${count} requests listed`;
 }
 
-async function loadAdminCounts() {
-  const res = await fetch(API, {
-    method: 'POST',
-    body: JSON.stringify({ action: 'getRequests' })
-  });
-
-  const data = await res.json();
+async function loadAdminCounts(forceRefresh = false) {
+  const data = await loadWorkflowRequests(forceRefresh);
   let total = 0;
   let pending = 0;
   let forwarded = 0;
@@ -3996,24 +3960,48 @@ function uploadSignature(role) {
   }
 
   const file = input.files[0];
+  // Basic size validation (keep signatures reasonably small)
+  if (file.size > 100000) {
+    alert('Please select an image smaller than 100KB.');
+    return;
+  }
+
   const reader = new FileReader();
   reader.onload = async (event) => {
     const dataUrl = event.target.result;
+
+    if (!dataUrl || !dataUrl.startsWith('data:image/')) {
+      alert('Please select a valid image file.');
+      return;
+    }
+
+    if (dataUrl.length > 45000) {
+      alert('Image data is too large after encoding. Please use a smaller or compressed image.');
+      return;
+    }
+
     if (preview) {
       preview.src = dataUrl;
       preview.style.display = 'block';
     }
 
     const base64 = dataUrl.split(',')[1];
-    const res = await fetch(API, {
-      method: 'POST',
-      body: JSON.stringify({ action: 'saveSignature', role: role, mimeType: file.type, fileBase64: base64 })
-    });
-    const data = await res.json();
-    if (!data.success) {
-      alert('Failed to upload signature.');
-    } else {
-      alert('Signature uploaded successfully.');
+    try {
+      const res = await fetch(API, {
+        method: 'POST',
+        headers: APPS_SCRIPT_JSON_HEADERS,
+        body: JSON.stringify({ action: 'saveSignature', role: role, mimeType: file.type, fileBase64: base64 })
+      });
+      const data = await res.json();
+      if (!data || !data.success) {
+        alert('Failed to upload signature.');
+      } else {
+        alert('Signature uploaded successfully.');
+        if (typeof loadSettings === 'function') loadSettings();
+      }
+    } catch (err) {
+      console.error('uploadSignature error', err);
+      alert('An error occurred while uploading the signature.');
     }
   };
   reader.readAsDataURL(file);
@@ -4357,35 +4345,49 @@ async function submitKaramayClaim() {
     closeKaramayModal();
   }
 
-  loadKaramayClaims();
+  await loadKaramayClaims(true);
 }
 
-async function loadKaramayClaims() {
-  let data = [KARAMAY_CLAIM_HEADERS];
-
-  try {
-    const res = await fetch(API, {
-      method: "POST",
-      headers: APPS_SCRIPT_JSON_HEADERS,
-      body: JSON.stringify({ action: "getKaramayClaims" })
-    });
-    const result = await parseApiJsonResponse(res);
-
-    if (Array.isArray(result) && result.length && Array.isArray(result[0])) {
-      const storedClaims = readStoredKaramayClaims();
-      data = storedClaims.length > 1 ? mergeKaramayClaims(result, storedClaims) : result;
-    } else if (shouldUseKaramayLocalFallback(result)) {
-      data = readStoredKaramayClaims();
-    } else {
-      console.warn("Unexpected Karamay claims payload, using local stored claims if available.", result);
-      data = readStoredKaramayClaims();
-    }
-  } catch (err) {
-    data = readStoredKaramayClaims();
+async function loadKaramayClaims(forceRefresh = false) {
+  if (!forceRefresh && Array.isArray(allKaramayClaims) && allKaramayClaims.length > 1) {
+    renderKaramayClaims();
+    return allKaramayClaims;
   }
 
-  allKaramayClaims = sortKaramayClaimsNewestFirst(data);
-  renderKaramayClaims();
+  if (!karamayClaimsPromise || forceRefresh) {
+    karamayClaimsPromise = (async () => {
+      let data = [KARAMAY_CLAIM_HEADERS];
+
+      try {
+        const res = await fetch(API, {
+          method: "POST",
+          headers: APPS_SCRIPT_JSON_HEADERS,
+          body: JSON.stringify({ action: "getKaramayClaims" })
+        });
+        const result = await parseApiJsonResponse(res);
+
+        if (Array.isArray(result) && result.length && Array.isArray(result[0])) {
+          const storedClaims = readStoredKaramayClaims();
+          data = storedClaims.length > 1 ? mergeKaramayClaims(result, storedClaims) : result;
+        } else if (shouldUseKaramayLocalFallback(result)) {
+          data = readStoredKaramayClaims();
+        } else {
+          console.warn("Unexpected Karamay claims payload, using local stored claims if available.", result);
+          data = readStoredKaramayClaims();
+        }
+      } catch (err) {
+        data = readStoredKaramayClaims();
+      }
+
+      allKaramayClaims = sortKaramayClaimsNewestFirst(data);
+      renderKaramayClaims();
+      return allKaramayClaims;
+    })().finally(() => {
+      karamayClaimsPromise = null;
+    });
+  }
+
+  return karamayClaimsPromise;
 }
 
 function renderKaramayClaims() {
@@ -4532,7 +4534,7 @@ function openKaramayClaimModal(id) {
     const role = getCurrentRole();
     const status = String(row[10] || '').trim();
 
-    if ((role === 'branch_manager' || role === 'membership_specialist') && (status === 'Pending' || isReturnedStatus(status))) {
+    if ((role === 'branch_manager' || role === 'membership_specialist') && status === 'Pending') {
       const returnBtn = document.createElement('button');
       returnBtn.className = 'btn red role-action-btn';
       returnBtn.style.cssText = 'margin-left: auto; margin-right: 10px;';
@@ -4605,7 +4607,7 @@ function navigateToTeller(page) {
       mainHeader.querySelector('.header-actions').innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button><button class="btn" onclick="alert(\'Export feature not configured yet\')">Export</button><button class="btn blue" onclick="openRequestModal()">New Withdrawal Request</button>';
     } else if (page === 'karamay') {
       headerContent.innerHTML = '<h1>Karamay Claims</h1><p class="subtitle">Customer Relations Specialist Portal - Encode Karamay requests and forward to Branch Manager</p>';
-      mainHeader.querySelector('.header-actions').innerHTML = '<button class="btn blue" onclick="openKaramayModal()">Create New Request</button><button class="btn" onclick="loadKaramayClaims()">Refresh</button>';
+      mainHeader.querySelector('.header-actions').innerHTML = '<button class="btn blue" onclick="openKaramayModal()">Create New Request</button><button class="btn" onclick="loadKaramayClaims(true)">Refresh</button>';
     } else if (page === 'submissions') {
       headerContent.innerHTML = '<h1>My Submitted Requests</h1><p class="subtitle">Teller Portal · View all your submitted withdrawal requests</p>';
       mainHeader.querySelector('.header-actions').innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button><button class="btn blue" onclick="openRequestModal()">New Request</button>';
@@ -4968,14 +4970,8 @@ function openModal(id) {
   }
 }
 
-async function loadBranchTable() {
-  const res = await fetch(API, {
-    method: "POST",
-    body: JSON.stringify({ action: "getRequests" })
-  });
-
-  const data = sortRequestDataNewestFirst(await res.json());
-  allRequests = data;
+async function loadBranchTable(forceRefresh = false) {
+  const data = await loadWorkflowRequests(forceRefresh);
 
   const branchId = localStorage.getItem("branchid");
   const role = getCurrentRole();
@@ -5000,13 +4996,8 @@ async function loadBranchTable() {
   if (reviewBadge) reviewBadge.innerText = count;
 }
 
-async function loadBranchCounts() {
-  const res = await fetch(API, {
-    method: "POST",
-    body: JSON.stringify({ action: "getRequests" })
-  });
-
-  const data = await res.json();
+async function loadBranchCounts(forceRefresh = false) {
+  const data = await loadWorkflowRequests(forceRefresh);
   const branchId = localStorage.getItem("branchid");
   const role = getCurrentRole();
   let total = 0;
@@ -5037,41 +5028,33 @@ async function loadBranchCounts() {
   if (document.getElementById("reviewBadge")) document.getElementById("reviewBadge").innerText = queueCount;
 }
 
-function loadBranchSubmitted() {
+async function loadBranchSubmitted(forceRefresh = false) {
   const branchId = localStorage.getItem("branchid");
   const role = getCurrentRole();
   const submittedStatuses = role === "branch_manager"
     ? ["Under Verification", "Under Review", "Forwarded", "Approved", "Rejected"]
     : ["Under Review", "Forwarded", "Approved", "Rejected"];
-  fetch(API, {
-    method: "POST",
-    body: JSON.stringify({ action: "getRequests" })
-  })
-    .then(res => res.json())
-    .then(data => {
-      data = sortRequestDataNewestFirst(data);
-      let html = "";
-      let count = 0;
-      allRequests = data;
 
-      for (let i = 1; i < data.length; i++) {
-        const r = data[i];
-        if (!Array.isArray(r) || !userCanViewBranchRequest(r, role, branchId)) continue;
-        if (!submittedStatuses.includes(r[7])) continue;
-        count++;
-        html += renderClaimRow(r, `<td>${escapeHtml(r[9] || "")}</td>`);
-      }
+  const data = await loadWorkflowRequests(forceRefresh);
+  let html = "";
+  let count = 0;
 
-      const submittedTable = document.getElementById("submittedTable");
-      if (submittedTable) submittedTable.innerHTML = html || '<tr><td colspan="10">No verified claims found.</td></tr>';
-      const submittedCount = document.getElementById("submittedCount");
-      if (submittedCount) submittedCount.innerText = `${count} claim${count !== 1 ? "s" : ""}`;
-    })
-    .catch(err => console.error("Failed to load submitted claims", err));
+  for (let i = 1; i < data.length; i++) {
+    const r = data[i];
+    if (!Array.isArray(r) || !userCanViewBranchRequest(r, role, branchId)) continue;
+    if (!submittedStatuses.includes(r[7])) continue;
+    count++;
+    html += renderClaimRow(r, `<td>${escapeHtml(r[9] || "")}</td>`);
+  }
+
+  const submittedTable = document.getElementById("submittedTable");
+  if (submittedTable) submittedTable.innerHTML = html || '<tr><td colspan="10">No verified claims found.</td></tr>';
+  const submittedCount = document.getElementById("submittedCount");
+  if (submittedCount) submittedCount.innerText = `${count} claim${count !== 1 ? "s" : ""}`;
 }
 
-async function loadFinanceTable() {
-  allRequests = await loadWorkflowRequests(true);
+async function loadFinanceTable(forceRefresh = false) {
+  await loadWorkflowRequests(forceRefresh);
   renderFinanceTable();
   updateFinanceSummary();
 }
@@ -5238,7 +5221,7 @@ function navigateToTeller(page) {
       if (headerActions) headerActions.innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button><button class="btn" onclick="alert(\'Export feature not configured yet\')">Export</button><button class="btn blue" onclick="openRequestModal()">New Claim Request</button>';
     } else if (page === 'karamay') {
       if (headerContent) headerContent.innerHTML = '<h1>Karamay Claims</h1><p class="subtitle">Customer Relations Specialist Portal - Encode Karamay requests and forward to Branch Manager</p>';
-      if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="openKaramayModal()">Create New Request</button><button class="btn" onclick="loadKaramayClaims()">Refresh</button>';
+      if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="openKaramayModal()">Create New Request</button><button class="btn" onclick="loadKaramayClaims(true)">Refresh</button>';
     } else if (page === 'submissions') {
       if (headerContent) headerContent.innerHTML = '<h1>My Submitted Claims</h1><p class="subtitle">Customer Relations Specialist Portal - Monitor encoded claims</p>';
       if (headerActions) headerActions.innerHTML = '<button class="btn" onclick="location.reload()">Refresh</button><button class="btn blue" onclick="openRequestModal()">New Claim</button>';
@@ -5301,7 +5284,7 @@ function navigateToBranch(page) {
   } else if (page === 'karamay') {
     if (headerTitle) headerTitle.innerText = '🧾 Karamay Claims';
     if (subtitle) subtitle.innerText = 'Review Karamay claims submitted for your branch';
-    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="loadKaramayClaims()">Refresh</button>';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="loadKaramayClaims(true)">Refresh</button>';
     loadKaramayClaims();
   } else if (page === 'settings') {
     if (headerTitle) headerTitle.innerText = 'Settings';
@@ -5374,13 +5357,8 @@ function navigateToFinance(page) {
   else if (page === 'karamay') loadKaramayClaims();
 }
 
-async function loadTellerCounts() {
-  const res = await fetch(API, {
-    method: "POST",
-    body: JSON.stringify({ action: "getRequests" })
-  });
-
-  const data = await res.json();
+async function loadTellerCounts(forceRefresh = false) {
+  const data = await loadWorkflowRequests(forceRefresh);
   const tellerEmail = localStorage.getItem("user");
   const tellerFullname = localStorage.getItem("fullname");
   let total = 0;

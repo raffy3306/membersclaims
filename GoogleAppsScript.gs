@@ -375,17 +375,12 @@ function getCell(meta, row, candidates, fallbackIndex, defaultValue) {
 }
 
 function setObjectFields(sheet, rowNumber, meta, valuesByHeader) {
-  const width = Math.max(meta.headers.length, sheet.getLastColumn(), 1);
-  const row = sheet.getRange(rowNumber, 1, 1, width).getValues()[0];
-
   Object.keys(valuesByHeader).forEach(function(header) {
     const index = meta.headerLookup[normalizeHeaderName(header)];
-    if (index !== undefined) {
-      row[index] = valuesByHeader[header];
+    if (index !== undefined && index >= 0) {
+      sheet.getRange(rowNumber, index + 1).setValue(valuesByHeader[header]);
     }
   });
-
-  sheet.getRange(rowNumber, 1, 1, row.length).setValues([row]);
 }
 
 function appendObjectRow(sheet, meta, valuesByHeader) {
