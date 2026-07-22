@@ -431,6 +431,61 @@ function parseAttachments(value) {
   }
 }
 
+// Save attachments that contain inline base64 data to Drive and return an array
+function saveAttachmentsToDrive(attachments) {
+  if (!Array.isArray(attachments) || !attachments.length) return [];
+
+  const folderName = 'MembersClaims_KaramayAttachments';
+  let folder;
+  try {
+    const folders = DriveApp.getFoldersByName(folderName);
+    folder = folders.hasNext() ? folders.next() : DriveApp.createFolder(folderName);
+  } catch (err) {
+    folder = null;
+  }
+
+  return attachments.map(function(att) {
+    try {
+      const attachment = JSON.parse(JSON.stringify(att || {}));
+      const dataUrl = String(attachment.file_data || attachment.dataUrl || attachment.data_url || attachment.url || '');
+      if (dataUrl && dataUrl.indexOf('data:') === 0 && dataUrl.indexOf(',') > -1) {
+        // data:[mime];base64,XXXXX
+        const parts = dataUrl.split(',');
+        const meta = parts[0];
+        const base64 = parts.slice(1).join(',');
+        const mimeMatch = meta.match(/^data:([^;]+)/i);
+        const mimeType = mimeMatch ? mimeMatch[1] : (attachment.file_type || 'application/octet-stream');
+        const name = attachment.file_name || attachment.name || ('attachment_' + new Date().getTime());
+
+        const blob = Utilities.newBlob(Utilities.base64Decode(base64), mimeType, name);
+        let file;
+        if (folder) {
+          file = folder.createFile(blob);
+        } else {
+          file = DriveApp.createFile(blob);
+        }
+        try {
+          file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
+        } catch (err2) {
+          // ignore sharing errors
+        }
+
+        attachment.drive_file_id = file.getId();
+        attachment.url = 'https://drive.google.com/uc?export=view&id=' + file.getId();
+        // remove raw data to keep sheet small
+        delete attachment.file_data;
+      } else if (dataUrl && /^(https?:)?\/\//i.test(dataUrl)) {
+        // already a URL - keep as is
+        attachment.url = dataUrl;
+        delete attachment.file_data;
+      }
+      return attachment;
+    } catch (err) {
+      return att;
+    }
+  });
+}
+
 function claimRowToLegacy(meta, row) {
   const dateStamp = getCell(meta, row, ["DateStamp", "Date Stamp", "DateFiled", "Date Filed", "CreatedAt", "LastUpdated"], 11, "");
   const dateAdmitted = getCell(meta, row, ["DateAdmitted", "Date Admitted"], 21, "");
@@ -545,6 +600,9 @@ function createKaramayClaim(data) {
         return { success: false, message: "Please upload the death certificate and valid ID attachments." };
       }
 
+      // process attachments: save file_data to Drive and replace with drive links
+      const processedAttachments = saveAttachmentsToDrive(Array.isArray(attachments) ? attachments : []);
+
       appendObjectRow(meta.sheet, meta, {
         ClaimID: claimId,
         MemberName: data.memberName || "",
@@ -562,7 +620,7 @@ function createKaramayClaim(data) {
         BranchManagerReviewedBy: "",
         SavingsCreditApprovedBy: "",
         Notes: "",
-        Attachments: JSON.stringify(attachments)
+        Attachments: JSON.stringify(processedAttachments)
       });
 
       return { success: true, request_id: claimId, claimID: claimId };
@@ -590,7 +648,9 @@ function editKaramayClaim(data) {
 
       const existingAttachments = parseAttachments(getCell(meta, found.row, ["Attachments"], 16, ""));
       const attachments = Array.isArray(data.attachments) ? data.attachments : [];
-      const finalAttachments = attachments.length ? attachments : existingAttachments;
+      // merge attachments as client expects; if new attachments contain file_data, save them to Drive
+      const merged = attachments.length ? attachments : existingAttachments;
+      const finalAttachments = saveAttachmentsToDrive(Array.isArray(merged) ? merged : []);
       const branchId = firstPresent(data.memberBranchId, data.branchid, data.tellerBranchId);
       const modeOfRelease = firstPresent(data.modeOfRelease, data.mode_of_release, data.ModeOfRelease, "Actual Delivery (Bouquet and Cash)");
       const actor = firstPresent(data.tellerName, data.tellerEmail);
@@ -1611,7 +1671,16 @@ function parsePostData(e) {
 
 function doPost(e) {
   try {
+    try {
+      Logger.log('doPost invoked');
+      Logger.log('doPost e.parameter: ' + JSON.stringify(e && e.parameter ? e.parameter : {}));
+      Logger.log('doPost postData present: ' + Boolean(e && e.postData && e.postData.contents));
+      Logger.log('doPost postData length: ' + (e && e.postData && e.postData.contents ? String(e.postData.contents).length : 0));
+    } catch (logErr) {
+      // ignore logging errors
+    }
     const data = parsePostData(e);
+    try { Logger.log('doPost parsed action: ' + String(data && data.action)); } catch (ignore) {}
     return jsonOutput(handleAction(data));
   } catch (err) {
     console.error("doPost error:", err);
