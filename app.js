@@ -1,4 +1,4 @@
-const API = "https://script.google.com/macros/s/AKfycbzuU4Ke9-SyyYJqJ47s3ATresVevJ4GAJqQE23hY0iETO2tgCmi9YkhQ_X1RrlcjlWomA/exec";
+const API = "https://script.google.com/macros/s/AKfycbxQUka9BTYrVuZWp296KU_JMvVwDWRH84hiasobJEcvHb5Bs04h09MkOV3y0oxYgQkUZg/exec";
 // Apps Script web apps reject CORS preflight OPTIONS requests, so POST JSON as plain text.
 const APPS_SCRIPT_JSON_HEADERS = { "Content-Type": "text/plain;charset=utf-8" };
 
@@ -1218,6 +1218,74 @@ async function supabaseGetMembers() {
   };
 }
 
+function getSupabaseMemberRow(data) {
+  return {
+    member_id: String(data.memberID || data.member_id || "").trim(),
+    full_name: String(data.fullName || data.full_name || data.name || "").trim(),
+    address: String(data.address || "").trim(),
+    contact_number: String(data.contactNumber || data.contact_number || "").trim(),
+    branch: String(data.branch || data.branchID || data.branch_id || "").trim(),
+    segmentation: String(data.segmentation || "").trim(),
+    gender: String(data.gender || "").trim(),
+    status: normalizeValue(data.status) === "inactive" ? "Inactive" : "Active",
+    updated_at: new Date().toISOString()
+  };
+}
+
+async function supabaseSaveMember(data) {
+  if (!["admin", "membership_specialist"].includes(normalizeRole(data.role))) {
+    return { success: false, message: "You are not authorized to manage members." };
+  }
+  const row = getSupabaseMemberRow(data);
+  if (!row.member_id || !row.full_name) return { success: false, message: "Member ID and full name are required." };
+
+  const db = getSupabaseClient();
+  if (!data.isEdit) {
+    const { data: existing, error: lookupError } = await db
+      .from(SUPABASE_TABLES.members)
+      .select("member_id")
+      .eq("member_id", row.member_id)
+      .maybeSingle();
+    if (lookupError) throw lookupError;
+    if (existing) return { success: false, message: "A member with this Member ID already exists." };
+  }
+
+  const { error } = await db.from(SUPABASE_TABLES.members).upsert(row, { onConflict: "member_id" });
+  if (error) throw error;
+  return { success: true };
+}
+
+async function supabaseSetMemberStatus(data) {
+  if (!["admin", "membership_specialist"].includes(normalizeRole(data.role))) {
+    return { success: false, message: "You are not authorized to manage members." };
+  }
+  const memberId = String(data.memberID || data.member_id || "").trim();
+  const status = normalizeValue(data.status) === "inactive" ? "Inactive" : "Active";
+  const db = getSupabaseClient();
+  const { data: updated, error } = await db
+    .from(SUPABASE_TABLES.members)
+    .update({ status, updated_at: new Date().toISOString() })
+    .eq("member_id", memberId)
+    .select("member_id")
+    .maybeSingle();
+  if (error) throw error;
+  if (!updated) return { success: false, message: "Member record not found." };
+  return { success: true, memberID: memberId, status };
+}
+
+async function supabaseImportMembers(data) {
+  if (!["admin", "membership_specialist"].includes(normalizeRole(data.role))) {
+    return { success: false, message: "You are not authorized to manage members." };
+  }
+  const incoming = Array.isArray(data.members) ? data.members : [];
+  const rows = incoming.map(getSupabaseMemberRow).filter(row => row.member_id && row.full_name);
+  if (!rows.length) return { success: false, message: "The import file contains no valid member records." };
+  const db = getSupabaseClient();
+  const { error } = await db.from(SUPABASE_TABLES.members).upsert(rows, { onConflict: "member_id" });
+  if (error) throw error;
+  return { success: true, added: rows.length, updated: 0, skipped: incoming.length - rows.length, errors: [] };
+}
+
 async function supabaseGetBranches() {
   const db = getSupabaseClient();
   const { data, error } = await db
@@ -1315,6 +1383,12 @@ async function handleSupabaseAction(payload) {
       return supabaseUpdateUser(payload);
     case "getMembers":
       return supabaseGetMembers(payload);
+    case "saveMember":
+      return supabaseSaveMember(payload);
+    case "setMemberStatus":
+      return supabaseSetMemberStatus(payload);
+    case "importMembers":
+      return supabaseImportMembers(payload);
     case "getBranches":
       return supabaseGetBranches(payload);
     case "getHospitals":
@@ -3624,6 +3698,266 @@ function exportData() {
   alert("Export feature coming soon!");
 }
 
+let memberDataRows = [];
+let editingMemberId = "";
+
+function userCanManageMemberData() {
+  const role = getCurrentRole();
+  return role === "admin" || role === "membership_specialist";
+}
+
+async function sendMemberDataAction(payload) {
+  const response = await fetch(API, {
+    method: "POST",
+    headers: APPS_SCRIPT_JSON_HEADERS,
+    body: JSON.stringify({ ...payload, role: getCurrentRole() })
+  });
+  return parseApiJsonResponse(response);
+}
+
+function renderMemberBranchOptions(branches) {
+  const options = document.getElementById("memberBranchOptions");
+  if (!options) return;
+  options.innerHTML = (branches || []).map(branch => {
+    const id = String(branch.branchID || branch.branchName || "").trim();
+    const name = String(branch.branchName || branch.branchID || "").trim();
+    return `<option value="${escapeHtml(id)}">${escapeHtml(name)}</option>`;
+  }).join("");
+}
+
+async function loadMemberData(forceRefresh = false) {
+  if (!userCanManageMemberData()) return;
+  if (!forceRefresh && memberDataRows.length) {
+    renderMemberDataTable();
+    return;
+  }
+
+  const table = document.getElementById("memberDataTable");
+  if (table) table.innerHTML = '<tr><td colspan="8" style="text-align:center;">Loading members...</td></tr>';
+
+  try {
+    const [membersResult, branchesResult] = await Promise.all([
+      sendMemberDataAction({ action: "getMembers" }),
+      sendMemberDataAction({ action: "getBranches" })
+    ]);
+    if (!membersResult.success) throw new Error(membersResult.message || "Unable to load members.");
+
+    memberDataRows = (membersResult.members || []).map(member => ({
+      memberID: String(member.memberID || "").trim(),
+      fullName: String(member.fullName || "").trim(),
+      address: String(member.address || "").trim(),
+      contactNumber: String(member.contactNumber || "").trim(),
+      branch: String(member.branch || "").trim(),
+      status: normalizeValue(member.status) === "inactive" ? "Inactive" : "Active",
+      segmentation: String(member.segmentation || "").trim(),
+      gender: String(member.gender || "").trim()
+    })).sort((a, b) => a.fullName.localeCompare(b.fullName));
+
+    if (branchesResult.success) {
+      allBranches = (branchesResult.branches || []).map(branch => ({
+        branchID: String(branch.branchID || branch.branchName || "").trim(),
+        branchName: String(branch.branchName || branch.branchID || "").trim()
+      }));
+      renderMemberBranchOptions(allBranches);
+    }
+    renderMemberDataTable();
+  } catch (err) {
+    if (table) table.innerHTML = `<tr><td colspan="8" style="text-align:center; color:#b91c1c;">${escapeHtml(err.message)}</td></tr>`;
+  }
+}
+
+function renderMemberDataTable() {
+  const table = document.getElementById("memberDataTable");
+  if (!table) return;
+  const query = normalizeValue(document.getElementById("memberDataSearch")?.value || "");
+  const statusFilter = document.getElementById("memberDataStatusFilter")?.value || "All";
+  const rows = memberDataRows.filter(member => {
+    const searchable = normalizeValue([member.memberID, member.fullName, member.branch, member.contactNumber, member.segmentation].join(" "));
+    return (!query || searchable.includes(query)) && (statusFilter === "All" || member.status === statusFilter);
+  });
+
+  table.innerHTML = rows.map(member => {
+    const encodedId = encodeURIComponent(member.memberID).replace(/'/g, "%27");
+    const nextStatus = member.status === "Active" ? "Inactive" : "Active";
+    return `<tr>
+      <td>${escapeHtml(member.memberID)}</td><td>${escapeHtml(member.fullName)}</td><td>${escapeHtml(member.gender || "-")}</td>
+      <td>${escapeHtml(getBranchName(member.branch) || member.branch || "-")}</td><td>${escapeHtml(member.segmentation || "-")}</td>
+      <td>${escapeHtml(member.contactNumber || "-")}</td>
+      <td><span class="member-status ${member.status.toLowerCase()}">${escapeHtml(member.status)}</span></td>
+      <td class="member-actions"><button class="btn blue" onclick="openMemberModal(decodeURIComponent('${encodedId}'))">Edit</button>
+      <button class="btn ${nextStatus === "Inactive" ? "red" : "green"}" onclick="toggleMemberStatus(decodeURIComponent('${encodedId}'), '${nextStatus}')">Set ${nextStatus}</button></td>
+    </tr>`;
+  }).join("") || '<tr><td colspan="8" style="text-align:center;">No members found.</td></tr>';
+
+  const count = document.getElementById("memberDataCount");
+  if (count) count.innerText = `${rows.length} member${rows.length === 1 ? "" : "s"} listed`;
+}
+
+function openMemberModal(memberId = "") {
+  if (!userCanManageMemberData()) return;
+  const member = memberId ? memberDataRows.find(item => String(item.memberID) === String(memberId)) : null;
+  editingMemberId = member?.memberID || "";
+  setInputValue("memberIdInput", member?.memberID || "");
+  setInputValue("memberFullNameInput", member?.fullName || "");
+  setInputValue("memberGenderInput", member?.gender || "");
+  setInputValue("memberContactInput", member?.contactNumber || "");
+  setInputValue("memberBranchInput", member?.branch || "");
+  setInputValue("memberSegmentationInput", member?.segmentation || "");
+  setInputValue("memberStatusInput", member?.status || "Active");
+  setInputValue("memberAddressInput", member?.address || "");
+
+  const idInput = document.getElementById("memberIdInput");
+  if (idInput) idInput.readOnly = Boolean(member);
+  const title = document.getElementById("memberModalTitle");
+  if (title) title.innerText = member ? "Edit Member" : "Add Member";
+  const modal = document.getElementById("memberModal");
+  if (modal) {
+    modal.style.display = "flex";
+    modal.style.pointerEvents = "auto";
+    modal.style.opacity = "1";
+    modal.classList.add("active");
+  }
+}
+
+function closeMemberModal() {
+  const modal = document.getElementById("memberModal");
+  if (modal) {
+    modal.classList.remove("active");
+    modal.style.display = "none";
+    modal.style.pointerEvents = "none";
+    modal.style.opacity = "0";
+  }
+  editingMemberId = "";
+}
+
+async function submitMemberForm() {
+  const payload = {
+    action: "saveMember",
+    isEdit: Boolean(editingMemberId),
+    originalMemberID: editingMemberId,
+    memberID: getInputTrim("memberIdInput"),
+    fullName: getInputTrim("memberFullNameInput"),
+    gender: getInputTrim("memberGenderInput"),
+    contactNumber: getInputTrim("memberContactInput"),
+    branch: getInputTrim("memberBranchInput"),
+    segmentation: getInputTrim("memberSegmentationInput"),
+    status: getInputTrim("memberStatusInput") || "Active",
+    address: getInputTrim("memberAddressInput")
+  };
+  if (!payload.memberID || !payload.fullName) {
+    alert("Member ID and full name are required.");
+    return;
+  }
+
+  try {
+    const result = await sendMemberDataAction(payload);
+    if (!result.success) throw new Error(result.message || "Unable to save member.");
+    sessionStorage.removeItem("tellerReferenceData:v1");
+    closeMemberModal();
+    memberDataRows = [];
+    await loadMemberData(true);
+    alert(payload.isEdit ? "Member updated successfully." : "Member added successfully.");
+  } catch (err) {
+    alert(err.message || "Unable to save member.");
+  }
+}
+
+async function toggleMemberStatus(memberId, status) {
+  if (!window.confirm(`Set member ${memberId} to ${status}?`)) return;
+  try {
+    const result = await sendMemberDataAction({ action: "setMemberStatus", memberID: memberId, status });
+    if (!result.success) throw new Error(result.message || "Unable to update member status.");
+    const member = memberDataRows.find(item => item.memberID === memberId);
+    if (member) member.status = status;
+    sessionStorage.removeItem("tellerReferenceData:v1");
+    renderMemberDataTable();
+  } catch (err) {
+    alert(err.message || "Unable to update member status.");
+  }
+}
+
+function parseMembersCsv(text) {
+  const records = [];
+  let row = [], value = "", quoted = false;
+  const source = String(text || "").replace(/^\uFEFF/, "");
+  for (let i = 0; i < source.length; i++) {
+    const char = source[i];
+    if (quoted && char === '"' && source[i + 1] === '"') { value += '"'; i++; }
+    else if (char === '"') quoted = !quoted;
+    else if (char === "," && !quoted) { row.push(value); value = ""; }
+    else if ((char === "\n" || char === "\r") && !quoted) {
+      if (char === "\r" && source[i + 1] === "\n") i++;
+      row.push(value); value = "";
+      if (row.some(cell => String(cell).trim())) records.push(row);
+      row = [];
+    } else value += char;
+  }
+  row.push(value);
+  if (row.some(cell => String(cell).trim())) records.push(row);
+  if (!records.length) return [];
+
+  const headers = records.shift().map(header => normalizeValue(header).replace(/[^a-z0-9]/g, ""));
+  const fieldAliases = {
+    memberID: ["memberid", "id", "membershipid"], fullName: ["fullname", "membername", "name"],
+    address: ["address"], contactNumber: ["contactnumber", "contact", "mobilenumber"],
+    branch: ["branch", "branchid"], status: ["status"], segmentation: ["segmentation", "segment"], gender: ["gender", "sex"]
+  };
+  const indexes = {};
+  Object.keys(fieldAliases).forEach(field => { indexes[field] = headers.findIndex(header => fieldAliases[field].includes(header)); });
+  if (indexes.memberID < 0 || indexes.fullName < 0) throw new Error("CSV must include MemberID and FullName columns.");
+
+  return records.map(cells => {
+    const member = {};
+    Object.keys(indexes).forEach(field => { member[field] = indexes[field] >= 0 ? String(cells[indexes[field]] || "").trim() : ""; });
+    member.status = normalizeValue(member.status) === "inactive" ? "Inactive" : "Active";
+    return member;
+  });
+}
+
+async function importMembersFromCsv(input) {
+  const file = input?.files?.[0];
+  if (!file) return;
+  try {
+    const members = parseMembersCsv(await file.text());
+    if (!members.length) throw new Error("The CSV contains no member rows.");
+    if (!window.confirm(`Import ${members.length} member row${members.length === 1 ? "" : "s"}? Existing Member IDs will be updated.`)) return;
+    const result = await sendMemberDataAction({ action: "importMembers", members });
+    if (!result.success) throw new Error(result.message || "Unable to import members.");
+    sessionStorage.removeItem("tellerReferenceData:v1");
+    memberDataRows = [];
+    await loadMemberData(true);
+    const errorNote = result.errors?.length ? `\n${result.errors.join("\n")}` : "";
+    alert(`Import complete. Added: ${result.added || 0}, updated: ${result.updated || 0}, skipped: ${result.skipped || 0}.${errorNote}`);
+  } catch (err) {
+    alert(err.message || "Unable to import CSV.");
+  } finally {
+    input.value = "";
+  }
+}
+
+function escapeCsvValue(value) {
+  let text = String(value ?? "");
+  if (/^[=+\-@]/.test(text)) text = "'" + text;
+  return `"${text.replace(/"/g, '""')}"`;
+}
+
+function exportMembersCsv() {
+  const headers = ["MemberID", "FullName", "Address", "ContactNumber", "Branch", "Status", "Segmentation", "Gender"];
+  const lines = [headers.map(escapeCsvValue).join(",")];
+  memberDataRows.forEach(member => lines.push([
+    member.memberID, member.fullName, member.address, member.contactNumber, member.branch,
+    member.status, member.segmentation, member.gender
+  ].map(escapeCsvValue).join(",")));
+  const url = URL.createObjectURL(new Blob(["\uFEFF" + lines.join("\r\n")], { type: "text/csv;charset=utf-8" }));
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = `members-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  URL.revokeObjectURL(url);
+}
+
 function formatFirstLoginFlag(value) {
   return value ? "TRUE" : "FALSE";
 }
@@ -3636,21 +3970,37 @@ function navigateToAdmin(section) {
 
   const headerTitle = document.querySelector('.main-header h1');
   const subtitle = document.querySelector('.main-header .subtitle');
+  const headerActions = document.querySelector('.main-header .header-actions');
 
   if (section === 'requests') {
     if (headerTitle) headerTitle.innerText = '💜 Admin Dashboard';
     if (subtitle) subtitle.innerText = 'Review system requests, settings, and approval metrics';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button><button class="btn blue" onclick="exportData()">Export</button>';
     loadAdminTable();
     loadAdminCounts();
     showSection('requests');
+  } else if (section === 'karamay') {
+    if (headerTitle) headerTitle.innerText = 'Karamay Claims';
+    if (subtitle) subtitle.innerText = 'View Karamay requests submitted across all branches.';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="loadKaramayClaims(true)">Refresh</button>';
+    showSection('karamay');
+    loadKaramayClaims();
   } else if (section === 'users') {
     if (headerTitle) headerTitle.innerText = 'User Management';
     if (subtitle) subtitle.innerText = 'Add, review, and update system users.';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="loadUsers()">Refresh</button><button class="btn blue" onclick="openUserModal()">Add User</button>';
     loadUsers();
     showSection('users');
+  } else if (section === 'members') {
+    if (headerTitle) headerTitle.innerText = 'Member Data Entry';
+    if (subtitle) subtitle.innerText = 'Import, export, add, edit, and manage member status.';
+    if (headerActions) headerActions.innerHTML = '<button class="btn" onclick="exportMembersCsv()">Export CSV</button><button class="btn blue" onclick="openMemberModal()">Add Member</button>';
+    loadMemberData();
+    showSection('members');
   } else if (section === 'settings') {
     if (headerTitle) headerTitle.innerText = '⚙️ Admin Settings';
     if (subtitle) subtitle.innerText = 'Manage signatory names and electronic signatures.';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="loadSettings()">Refresh</button>';
     loadSettings();
     showSection('settings');
   }
@@ -4595,6 +4945,8 @@ function renderKaramayClaims() {
   const branchId = String(localStorage.getItem('branchid') || '').trim();
 
   const normalizedBranchId = normalizeValue(branchId);
+  const searchText = normalizeValue(document.getElementById('adminKaramaySearch')?.value || '');
+  const statusFilter = document.getElementById('adminKaramayStatusFilter')?.value || 'All Statuses';
   const rows = (allKaramayClaims || [])
     .slice(1)
     .filter(row => Array.isArray(row))
@@ -4610,7 +4962,16 @@ function renderKaramayClaims() {
         return true;
       }
       return false;
+    })
+    .filter(row => {
+      const status = String(row[10] || '').trim();
+      const searchable = normalizeValue([row[0], row[1], row[2], getBranchName(row[2]), row[5], row[6], status].join(' '));
+      return (!searchText || searchable.includes(searchText)) &&
+        (statusFilter === 'All Statuses' || status === statusFilter);
     });
+
+  const table = document.getElementById("karamayTable");
+  const showBranch = table?.dataset.showBranch === "true";
 
   const html = rows.map(row => {
     const dateFiled = formatDateTimeForDisplay(row[12]);
@@ -4622,6 +4983,7 @@ function renderKaramayClaims() {
       <tr>
         <td>${escapeHtml(row[0])}</td>
         <td>${escapeHtml(row[1])}</td>
+        ${showBranch ? `<td>${escapeHtml(getBranchName(row[2]) || row[2] || "-")}</td>` : ""}
         <td>${escapeHtml(row[5])}</td>
         <td>${escapeHtml(row[6])}</td>
         <td>${escapeHtml(row[4])}</td>
@@ -4634,11 +4996,10 @@ function renderKaramayClaims() {
     `;
   }).join("");
 
-  const table = document.getElementById("karamayTable");
-  if (table) table.innerHTML = html || '<tr><td colspan="8">No Karamay claims found.</td></tr>';
+  if (table) table.innerHTML = html || `<tr><td colspan="${showBranch ? 9 : 8}">No Karamay claims found.</td></tr>`;
 
   const count = document.getElementById("karamayCount");
-  if (count) count.innerText = `${rows.length} claim${rows.length !== 1 ? "s" : ""}`;
+  if (count) count.innerText = `${rows.length} claim${rows.length !== 1 ? "s" : ""} listed`;
 }
 
 async function openKaramayClaimModal(id) {
@@ -5489,6 +5850,12 @@ function navigateToBranch(page) {
     if (subtitle) subtitle.innerText = 'Claims verified by MRD and sent onward in the workflow';
     if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button>';
     loadBranchSubmitted();
+  } else if (page === 'members') {
+    if (!userCanManageMemberData()) return;
+    if (headerTitle) headerTitle.innerText = 'Member Data Entry';
+    if (subtitle) subtitle.innerText = 'Import, export, add, edit, and manage member status';
+    if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="loadMemberData(true)">Refresh</button>';
+    loadMemberData();
   } else if (page === 'notifications') {
     if (headerTitle) headerTitle.innerText = 'Notifications';
     if (subtitle) subtitle.innerText = 'Membership verification alerts and updates';
@@ -5510,6 +5877,7 @@ function navigateToBranch(page) {
   const notificationsView = document.getElementById('notificationsView');
   const settingsView = document.getElementById('settingsView');
   const karamayView = document.getElementById('karamayView');
+  const memberDataView = document.getElementById('memberDataView');
 
   if (reviewView) reviewView.style.display = (page === 'review') ? 'block' : 'none';
   if (dashboardView) dashboardView.style.display = (page === 'dashboard') ? 'block' : 'none';
@@ -5517,6 +5885,7 @@ function navigateToBranch(page) {
   if (notificationsView) notificationsView.style.display = (page === 'notifications') ? 'block' : 'none';
   if (settingsView) settingsView.style.display = (page === 'settings') ? 'block' : 'none';
   if (karamayView) karamayView.style.display = (page === 'karamay') ? 'block' : 'none';
+  if (memberDataView) memberDataView.style.display = (page === 'members') ? 'block' : 'none';
 }
 
 function navigateToFinance(page) {

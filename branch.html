@@ -40,6 +40,9 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
       <button id="karamayMenuButton" class="sidebar-btn" onclick="navigateToBranch('karamay')">
         <span class="icon">🧾</span> Karamay Claims
       </button>
+      <button id="memberDataMenuButton" class="sidebar-btn" onclick="navigateToBranch('members')">
+        <span class="icon">&#128100;</span> Member Data Entry
+      </button>
     </div>
 
     <div class="sidebar-more">
@@ -226,6 +229,24 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
       </div>
     </div>
 
+    <div id="memberDataView" style="display: none;">
+      <div class="table-container">
+        <div class="table-header">
+          <div><h3>Member Data Entry</h3><p class="table-count" id="memberDataCount">0 members listed</p></div>
+          <div class="table-controls member-data-controls">
+            <input type="text" placeholder="Search ID, name, branch..." class="search-input" id="memberDataSearch" oninput="renderMemberDataTable()">
+            <select class="status-filter" id="memberDataStatusFilter" onchange="renderMemberDataTable()"><option value="All">All Statuses</option><option value="Active">Active</option><option value="Inactive">Inactive</option></select>
+            <input id="memberImportFile" type="file" accept=".csv,text/csv" hidden onchange="importMembersFromCsv(this)">
+            <button class="btn" onclick="document.getElementById('memberImportFile').click()">Import CSV</button>
+            <button class="btn" onclick="exportMembersCsv()">Export CSV</button>
+            <button class="btn blue" onclick="openMemberModal()">Add Member</button>
+          </div>
+        </div>
+        <div class="member-import-note">CSV columns: MemberID, FullName, Address, ContactNumber, Branch, Status, Segmentation, Gender.</div>
+        <div style="overflow-x:auto;"><table><thead><tr><th>MEMBER ID</th><th>FULL NAME</th><th>GENDER</th><th>BRANCH</th><th>SEGMENTATION</th><th>CONTACT</th><th>STATUS</th><th>ACTIONS</th></tr></thead><tbody id="memberDataTable"></tbody></table></div>
+      </div>
+    </div>
+
     <div id="notificationsView" style="display: none;">
       <div style="padding: 40px; text-align: center; color: #666;">
         <h2>Notifications</h2>
@@ -240,6 +261,24 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
       </div>
     </div>
 
+  </div>
+</div>
+
+<!-- MEMBER MODAL -->
+<div class="modal" id="memberModal">
+  <div class="modal-content modal-lg">
+    <div class="modal-header"><h3 id="memberModalTitle">Add Member</h3><button class="modal-close" onclick="closeMemberModal()">X</button></div>
+    <div class="modal-body member-form-grid">
+      <div class="form-group"><label for="memberIdInput">Member ID *</label><input id="memberIdInput" class="form-control"></div>
+      <div class="form-group"><label for="memberFullNameInput">Full Name *</label><input id="memberFullNameInput" class="form-control"></div>
+      <div class="form-group"><label for="memberGenderInput">Gender</label><select id="memberGenderInput" class="form-control"><option value="">Select</option><option>Male</option><option>Female</option></select></div>
+      <div class="form-group"><label for="memberContactInput">Contact Number</label><input id="memberContactInput" class="form-control"></div>
+      <div class="form-group"><label for="memberBranchInput">Branch</label><input id="memberBranchInput" class="form-control" list="memberBranchOptions"><datalist id="memberBranchOptions"></datalist></div>
+      <div class="form-group"><label for="memberSegmentationInput">Segmentation</label><select id="memberSegmentationInput" class="form-control"><option value="">Select</option><option>Silver</option><option>Gold</option><option>Diamond</option></select></div>
+      <div class="form-group"><label for="memberStatusInput">Status</label><select id="memberStatusInput" class="form-control"><option>Active</option><option>Inactive</option></select></div>
+      <div class="form-group member-address-field"><label for="memberAddressInput">Address</label><textarea id="memberAddressInput" class="form-control" rows="3"></textarea></div>
+    </div>
+    <div class="modal-footer"><button class="btn" onclick="closeMemberModal()">Cancel</button><button id="memberSubmitButton" class="btn blue" onclick="submitMemberForm()">Save Member</button></div>
   </div>
 </div>
 
@@ -267,6 +306,10 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
     if (karamayButton) {
       karamayButton.style.display = "none";
     }
+  }
+  if (!["membership_specialist", "membershipspecialist", "mrdspecialist", "verifier", "processor"].includes(role)) {
+    const memberDataButton = document.getElementById("memberDataMenuButton");
+    if (memberDataButton) memberDataButton.style.display = "none";
   }
 })();
 </script>

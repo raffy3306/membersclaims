@@ -731,6 +731,64 @@ tbody tr:last-child td {
   box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
 }
 
+.member-data-controls {
+  flex-wrap: wrap;
+}
+
+.member-import-note {
+  padding: 0 20px 14px;
+  color: #64748b;
+  font-size: 12px;
+}
+
+.member-form-grid {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 16px 20px;
+}
+
+.member-form-grid .form-group {
+  margin: 0;
+}
+
+.member-address-field {
+  grid-column: 1 / -1;
+}
+
+.member-status {
+  display: inline-block;
+  padding: 4px 10px;
+  border-radius: 999px;
+  font-size: 12px;
+  font-weight: 700;
+}
+
+.member-status.active {
+  color: #166534;
+  background: #dcfce7;
+}
+
+.member-status.inactive {
+  color: #991b1b;
+  background: #fee2e2;
+}
+
+.member-actions {
+  display: flex;
+  gap: 6px;
+  white-space: nowrap;
+}
+
+@media (max-width: 760px) {
+  .member-form-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .member-address-field {
+    grid-column: auto;
+  }
+}
+
 .form-hint {
   display: block;
   margin-top: 6px;

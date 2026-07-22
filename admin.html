@@ -29,10 +29,16 @@ if (localStorage.getItem("role") !== "admin") {
 
     <div class="sidebar-main">
       <button class="sidebar-btn active" onclick="navigateToAdmin('requests')">
-        <span class="icon">&#128203;</span> All Requests
+        <span class="icon">&#128203;</span> Hospitalization Claims
+      </button>
+      <button class="sidebar-btn" onclick="navigateToAdmin('karamay')">
+        <span class="icon">&#129534;</span> Karamay Claims
       </button>
       <button class="sidebar-btn" onclick="navigateToAdmin('users')">
         <span class="icon">&#128101;</span> Users
+      </button>
+      <button class="sidebar-btn" onclick="navigateToAdmin('members')">
+        <span class="icon">&#128100;</span> Member Data Entry
       </button>
       <button class="sidebar-btn" onclick="navigateToAdmin('settings')">
         <span class="icon">&#9881;&#65039;</span> Settings
@@ -130,6 +136,41 @@ if (localStorage.getItem("role") !== "admin") {
       </div>
     </div>
 
+    <div id="karamaySection" style="display: none;">
+      <div class="table-container">
+        <div class="table-header">
+          <div>
+            <h3>All Karamay Claims</h3>
+            <p class="table-count" id="karamayCount">0 claims listed</p>
+          </div>
+          <div class="table-controls">
+            <input type="text" placeholder="Search claim, member, beneficiary, branch..." class="search-input" id="adminKaramaySearch" oninput="renderKaramayClaims()">
+            <select class="status-filter" id="adminKaramayStatusFilter" onchange="renderKaramayClaims()">
+              <option value="All Statuses">All Statuses</option>
+              <option value="Pending">Pending</option>
+              <option value="Under Verification">Under Verification</option>
+              <option value="Under Review">Under Review</option>
+              <option value="Forwarded">Forwarded</option>
+              <option value="Approved">Approved</option>
+              <option value="Rejected">Rejected</option>
+              <option value="Returned">Returned</option>
+            </select>
+          </div>
+        </div>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>CLAIM NO.</th><th>MEMBER NAME</th><th>BRANCH</th><th>BENEFICIARY</th>
+                <th>RELATIONSHIP</th><th>DATE OF DEATH</th><th>STATUS</th><th>DATE FILED</th><th>ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody id="karamayTable" data-show-branch="true"></tbody>
+          </table>
+        </div>
+      </div>
+    </div>
+
     <div id="usersSection" style="display: none;">
       <div class="table-container">
         <div class="table-header">
@@ -165,6 +206,41 @@ if (localStorage.getItem("role") !== "admin") {
           </thead>
           <tbody id="usersTable"></tbody>
         </table>
+      </div>
+    </div>
+
+    <div id="membersSection" style="display: none;">
+      <div class="table-container">
+        <div class="table-header">
+          <div>
+            <h3>Member Data Entry</h3>
+            <p class="table-count" id="memberDataCount">0 members listed</p>
+          </div>
+          <div class="table-controls member-data-controls">
+            <input type="text" placeholder="Search ID, name, branch..." class="search-input" id="memberDataSearch" oninput="renderMemberDataTable()">
+            <select class="status-filter" id="memberDataStatusFilter" onchange="renderMemberDataTable()">
+              <option value="All">All Statuses</option>
+              <option value="Active">Active</option>
+              <option value="Inactive">Inactive</option>
+            </select>
+            <input id="memberImportFile" type="file" accept=".csv,text/csv" hidden onchange="importMembersFromCsv(this)">
+            <button class="btn" onclick="document.getElementById('memberImportFile').click()">Import CSV</button>
+            <button class="btn" onclick="exportMembersCsv()">Export CSV</button>
+            <button class="btn blue" onclick="openMemberModal()">Add Member</button>
+          </div>
+        </div>
+        <div class="member-import-note">CSV columns: MemberID, FullName, Address, ContactNumber, Branch, Status, Segmentation, Gender.</div>
+        <div style="overflow-x:auto;">
+          <table>
+            <thead>
+              <tr>
+                <th>MEMBER ID</th><th>FULL NAME</th><th>GENDER</th><th>BRANCH</th>
+                <th>SEGMENTATION</th><th>CONTACT</th><th>STATUS</th><th>ACTIONS</th>
+              </tr>
+            </thead>
+            <tbody id="memberDataTable"></tbody>
+          </table>
+        </div>
       </div>
     </div>
 
@@ -262,6 +338,27 @@ if (localStorage.getItem("role") !== "admin") {
   </div>
 </div>
 
+<!-- MEMBER MODAL -->
+<div class="modal" id="memberModal">
+  <div class="modal-content modal-lg">
+    <div class="modal-header">
+      <h3 id="memberModalTitle">Add Member</h3>
+      <button class="modal-close" onclick="closeMemberModal()">X</button>
+    </div>
+    <div class="modal-body member-form-grid">
+      <div class="form-group"><label for="memberIdInput">Member ID *</label><input id="memberIdInput" class="form-control"></div>
+      <div class="form-group"><label for="memberFullNameInput">Full Name *</label><input id="memberFullNameInput" class="form-control"></div>
+      <div class="form-group"><label for="memberGenderInput">Gender</label><select id="memberGenderInput" class="form-control"><option value="">Select</option><option>Male</option><option>Female</option></select></div>
+      <div class="form-group"><label for="memberContactInput">Contact Number</label><input id="memberContactInput" class="form-control"></div>
+      <div class="form-group"><label for="memberBranchInput">Branch</label><input id="memberBranchInput" class="form-control" list="memberBranchOptions"><datalist id="memberBranchOptions"></datalist></div>
+      <div class="form-group"><label for="memberSegmentationInput">Segmentation</label><select id="memberSegmentationInput" class="form-control"><option value="">Select</option><option>Silver</option><option>Gold</option><option>Diamond</option></select></div>
+      <div class="form-group"><label for="memberStatusInput">Status</label><select id="memberStatusInput" class="form-control"><option>Active</option><option>Inactive</option></select></div>
+      <div class="form-group member-address-field"><label for="memberAddressInput">Address</label><textarea id="memberAddressInput" class="form-control" rows="3"></textarea></div>
+    </div>
+    <div class="modal-footer"><button class="btn" onclick="closeMemberModal()">Cancel</button><button id="memberSubmitButton" class="btn blue" onclick="submitMemberForm()">Save Member</button></div>
+  </div>
+</div>
+
 <!-- REQUEST DETAILS MODAL -->
 <div class="modal" id="modal">
   <div class="modal-content modal-lg">
@@ -348,7 +445,9 @@ loadSettings();
 function showSection(section) {
   document.getElementById('adminCards').style.display = section === 'requests' ? 'grid' : 'none';
   document.getElementById('requestsSection').style.display = section === 'requests' ? 'block' : 'none';
+  document.getElementById('karamaySection').style.display = section === 'karamay' ? 'block' : 'none';
   document.getElementById('usersSection').style.display = section === 'users' ? 'block' : 'none';
+  document.getElementById('membersSection').style.display = section === 'members' ? 'block' : 'none';
   document.getElementById('settingsSection').style.display = section === 'settings' ? 'block' : 'none';
 }
 </script>

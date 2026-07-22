@@ -1422,6 +1422,143 @@ function getMembers(branchMapOverride) {
   }
 }
 
+function canManageMembers(data) {
+  const role = normalizeRole(data && data.role);
+  return role === "admin" || role === "membership_specialist";
+}
+
+function normalizeMemberStatus(status) {
+  return normalizeValue(status).toLowerCase() === "inactive" ? "Inactive" : "Active";
+}
+
+function getMemberValues(data) {
+  return {
+    MemberID: normalizeValue(firstPresent(data.memberID, data.member_id)),
+    FullName: normalizeValue(firstPresent(data.fullName, data.full_name, data.name)),
+    Address: normalizeValue(data.address),
+    ContactNumber: normalizeValue(firstPresent(data.contactNumber, data.contact_number)),
+    Branch: normalizeValue(firstPresent(data.branch, data.branchID, data.branch_id)),
+    Status: normalizeMemberStatus(data.status),
+    Segmentation: normalizeValue(data.segmentation),
+    Gender: normalizeValue(data.gender)
+  };
+}
+
+function saveMember(data) {
+  if (!canManageMembers(data)) return { success: false, message: "You are not authorized to manage members." };
+
+  try {
+    return withScriptLock(function() {
+      const meta = getSheetMetadata(SHEETS.members, MEMBER_HEADERS);
+      const values = getMemberValues(data || {});
+      if (!values.MemberID || !values.FullName) {
+        return { success: false, message: "Member ID and full name are required." };
+      }
+
+      const originalMemberId = normalizeValue(firstPresent(data.originalMemberID, data.original_member_id, values.MemberID));
+      const found = findRowByValue(meta, ["MemberID", "Member ID"], 0, originalMemberId);
+
+      if (data.isEdit) {
+        if (!found) return { success: false, message: "Member record not found." };
+        setObjectFieldsAtomic(meta.sheet, found.rowNumber, meta, found.row, values);
+      } else {
+        if (found) return { success: false, message: "A member with this Member ID already exists." };
+        appendObjectRow(meta.sheet, meta, values);
+      }
+
+      return { success: true, member: values };
+    });
+  } catch (err) {
+    return { success: false, message: "Error: " + err.toString() };
+  }
+}
+
+function setMemberStatus(data) {
+  if (!canManageMembers(data)) return { success: false, message: "You are not authorized to manage members." };
+
+  try {
+    return withScriptLock(function() {
+      const meta = getSheetMetadata(SHEETS.members, MEMBER_HEADERS);
+      const memberId = normalizeValue(firstPresent(data.memberID, data.member_id));
+      const found = findRowByValue(meta, ["MemberID", "Member ID"], 0, memberId);
+      if (!found) return { success: false, message: "Member record not found." };
+
+      const status = normalizeMemberStatus(data.status);
+      setObjectFieldsAtomic(meta.sheet, found.rowNumber, meta, found.row, { Status: status });
+      return { success: true, memberID: memberId, status: status };
+    });
+  } catch (err) {
+    return { success: false, message: "Error: " + err.toString() };
+  }
+}
+
+function importMembers(data) {
+  if (!canManageMembers(data)) return { success: false, message: "You are not authorized to manage members." };
+
+  try {
+    return withScriptLock(function() {
+      const incoming = Array.isArray(data.members) ? data.members : [];
+      if (!incoming.length) return { success: false, message: "The import file contains no member records." };
+      if (incoming.length > 5000) return { success: false, message: "A single import is limited to 5,000 members." };
+
+      const meta = getSheetMetadata(SHEETS.members, MEMBER_HEADERS);
+      const outputRows = meta.rows.slice(1).map(function(row) {
+        return meta.headers.map(function(header, index) { return index < row.length ? row[index] : ""; });
+      });
+      const memberIdIndex = getHeaderIndex(meta, ["MemberID", "Member ID"], 0);
+      const rowIndexByMemberId = {};
+      outputRows.forEach(function(row, index) {
+        const key = normalizeValue(row[memberIdIndex]).toLowerCase();
+        if (key) rowIndexByMemberId[key] = index;
+      });
+
+      let added = 0;
+      let updated = 0;
+      let skipped = 0;
+      const errors = [];
+
+      incoming.forEach(function(member, inputIndex) {
+        const values = getMemberValues(member || {});
+        if (!values.MemberID || !values.FullName) {
+          skipped++;
+          errors.push("Row " + (inputIndex + 2) + ": Member ID and full name are required.");
+          return;
+        }
+
+        const key = values.MemberID.toLowerCase();
+        let outputIndex = rowIndexByMemberId[key];
+        if (outputIndex === undefined) {
+          outputIndex = outputRows.length;
+          rowIndexByMemberId[key] = outputIndex;
+          outputRows.push(meta.headers.map(function() { return ""; }));
+          added++;
+        } else {
+          updated++;
+        }
+
+        Object.keys(values).forEach(function(header) {
+          const columnIndex = meta.headerLookup[normalizeHeaderName(header)];
+          if (columnIndex !== undefined) outputRows[outputIndex][columnIndex] = values[header];
+        });
+      });
+
+      if (outputRows.length) {
+        meta.sheet.getRange(2, 1, outputRows.length, meta.headers.length).setValues(outputRows);
+      }
+
+      return {
+        success: true,
+        added: added,
+        updated: updated,
+        skipped: skipped,
+        errors: errors.slice(0, 20)
+      };
+    });
+  } catch (err) {
+    return { success: false, message: "Error: " + err.toString() };
+  }
+}
+
 function getBranches() {
   try {
     const meta = getSheetMetadata(SHEETS.branches, BRANCH_HEADERS);
@@ -1826,6 +1963,12 @@ function handleAction(data) {
       return updateUser(data);
     case "getMembers":
       return getMembers();
+    case "saveMember":
+      return saveMember(data);
+    case "setMemberStatus":
+      return setMemberStatus(data);
+    case "importMembers":
+      return importMembers(data);
     case "getBranches":
       return getBranches();
     case "getHospitals":
