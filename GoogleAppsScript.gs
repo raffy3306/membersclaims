@@ -445,7 +445,10 @@ function saveAttachmentsToDrive(attachments) {
   }
 
   return attachments.map(function(att) {
+  Logger.log('saveAttachmentsToDrive: processing %s attachments', attachments.length);
+  return attachments.map(function(att, idx) {
     try {
+      Logger.log('saveAttachmentsToDrive: processing index %s', idx);
       const attachment = JSON.parse(JSON.stringify(att || {}));
       const dataUrl = String(attachment.file_data || attachment.dataUrl || attachment.data_url || attachment.url || '');
       if (dataUrl && dataUrl.indexOf('data:') === 0 && dataUrl.indexOf(',') > -1) {
@@ -456,6 +459,7 @@ function saveAttachmentsToDrive(attachments) {
         const mimeMatch = meta.match(/^data:([^;]+)/i);
         const mimeType = mimeMatch ? mimeMatch[1] : (attachment.file_type || 'application/octet-stream');
         const name = attachment.file_name || attachment.name || ('attachment_' + new Date().getTime());
+        Logger.log('saveAttachmentsToDrive: saving %s (%s) size~%s', name, mimeType, attachment.file_size || 'unknown');
 
         const blob = Utilities.newBlob(Utilities.base64Decode(base64), mimeType, name);
         let file;
@@ -464,10 +468,11 @@ function saveAttachmentsToDrive(attachments) {
         } else {
           file = DriveApp.createFile(blob);
         }
+        Logger.log('saveAttachmentsToDrive: created file id %s for %s', file.getId(), name);
         try {
           file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
         } catch (err2) {
-          // ignore sharing errors
+          Logger.log('saveAttachmentsToDrive: sharing failed for %s: %s', file.getId(), String(err2));
         }
 
         attachment.drive_file_id = file.getId();
@@ -478,9 +483,12 @@ function saveAttachmentsToDrive(attachments) {
         // already a URL - keep as is
         attachment.url = dataUrl;
         delete attachment.file_data;
+      } else {
+        Logger.log('saveAttachmentsToDrive: no dataUrl found for attachment index %s', idx);
       }
       return attachment;
     } catch (err) {
+      Logger.log('saveAttachmentsToDrive: error processing attachment index %s: %s', idx, String(err));
       return att;
     }
   });
