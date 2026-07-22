@@ -7,6 +7,7 @@ const SHEETS = {
   users: "Users",
   claims: "Claims",
   karamayClaims: "Karamay Claims",
+  karamayAttachmentData: "Karamay Attachment Data",
   members: "Members",
   branches: "Branches",
   hospitals: "Hospitals",
@@ -61,6 +62,19 @@ const KARAMAY_CLAIM_HEADERS = [
   "Notes",
   "Attachments"
 ];
+
+const KARAMAY_ATTACHMENT_DATA_HEADERS = [
+  "StorageID",
+  "ClaimID",
+  "DocumentType",
+  "FileName",
+  "FileType",
+  "FileSize",
+  "ChunkIndex",
+  "ChunkData"
+];
+
+const KARAMAY_ATTACHMENT_CHUNK_SIZE = 40000;
 
 const USER_HEADERS = [
   "Email",
@@ -431,70 +445,188 @@ function parseAttachments(value) {
   }
 }
 
-// Save attachments that contain inline base64 data to Drive and return an array
-function saveAttachmentsToDrive(attachments) {
-  if (!Array.isArray(attachments) || !attachments.length) return [];
+function setObjectFieldsAtomic(sheet, rowNumber, meta, currentRow, valuesByHeader) {
+  const updatedRow = meta.headers.map(function(header, index) {
+    return index < currentRow.length ? currentRow[index] : "";
+  });
 
-  const folderName = 'MembersClaims_KaramayAttachments';
-  let folder;
-  try {
-    const folders = DriveApp.getFoldersByName(folderName);
-    folder = folders.hasNext() ? folders.next() : DriveApp.createFolder(folderName);
-  } catch (err) {
-    folder = null;
+  Object.keys(valuesByHeader).forEach(function(header) {
+    const index = meta.headerLookup[normalizeHeaderName(header)];
+    if (index !== undefined && index >= 0) {
+      updatedRow[index] = valuesByHeader[header];
+    }
+  });
+
+  sheet.getRange(rowNumber, 1, 1, updatedRow.length).setValues([updatedRow]);
+}
+
+function getKaramayAttachmentDocumentType(attachment, index) {
+  const explicitType = String(
+    attachment && (attachment.document_type || attachment.documentType) || ""
+  ).trim();
+  const normalizedType = explicitType.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+  if (normalizedType.indexOf("death") > -1 && normalizedType.indexOf("certificate") > -1) {
+    return "Death Certificate";
   }
 
-  return attachments.map(function(att) {
-  Logger.log('saveAttachmentsToDrive: processing %s attachments', attachments.length);
-  return attachments.map(function(att, idx) {
-    try {
-      Logger.log('saveAttachmentsToDrive: processing index %s', idx);
-      const attachment = JSON.parse(JSON.stringify(att || {}));
-      const dataUrl = String(attachment.file_data || attachment.dataUrl || attachment.data_url || attachment.url || '');
-      if (dataUrl && dataUrl.indexOf('data:') === 0 && dataUrl.indexOf(',') > -1) {
-        // data:[mime];base64,XXXXX
-        const parts = dataUrl.split(',');
-        const meta = parts[0];
-        const base64 = parts.slice(1).join(',');
-        const mimeMatch = meta.match(/^data:([^;]+)/i);
-        const mimeType = mimeMatch ? mimeMatch[1] : (attachment.file_type || 'application/octet-stream');
-        const name = attachment.file_name || attachment.name || ('attachment_' + new Date().getTime());
-        Logger.log('saveAttachmentsToDrive: saving %s (%s) size~%s', name, mimeType, attachment.file_size || 'unknown');
+  if (normalizedType.indexOf("valid id") > -1 || normalizedType.indexOf("beneficiary id") > -1) {
+    return "Beneficiary Valid ID";
+  }
 
-        const blob = Utilities.newBlob(Utilities.base64Decode(base64), mimeType, name);
-        let file;
-        if (folder) {
-          file = folder.createFile(blob);
-        } else {
-          file = DriveApp.createFile(blob);
-        }
-        Logger.log('saveAttachmentsToDrive: created file id %s for %s', file.getId(), name);
-        try {
-          file.setSharing(DriveApp.Access.ANYONE_WITH_LINK, DriveApp.Permission.VIEW);
-        } catch (err2) {
-          Logger.log('saveAttachmentsToDrive: sharing failed for %s: %s', file.getId(), String(err2));
-        }
+  if (explicitType) return explicitType;
+  if (index === 0) return "Death Certificate";
+  if (index === 1) return "Beneficiary Valid ID";
+  return "";
+}
 
-        attachment.drive_file_id = file.getId();
-        attachment.url = 'https://drive.google.com/uc?export=view&id=' + file.getId();
-        // remove raw data to keep sheet small
-        delete attachment.file_data;
-      } else if (dataUrl && /^(https?:)?\/\//i.test(dataUrl)) {
-        // already a URL - keep as is
-        attachment.url = dataUrl;
-        delete attachment.file_data;
-      } else {
-        Logger.log('saveAttachmentsToDrive: no dataUrl found for attachment index %s', idx);
-      }
-      return attachment;
-    } catch (err) {
-      Logger.log('saveAttachmentsToDrive: error processing attachment index %s: %s', idx, String(err));
-      return att;
-    }
+function normalizeKaramayAttachments(attachments) {
+  return (Array.isArray(attachments) ? attachments : []).map(function(attachment, index) {
+    const copy = JSON.parse(JSON.stringify(attachment || {}));
+    const documentType = getKaramayAttachmentDocumentType(copy, index);
+    if (documentType) copy.document_type = documentType;
+    return copy;
   });
 }
 
-function claimRowToLegacy(meta, row) {
+function mergeKaramayAttachments(existingAttachments, replacementAttachments) {
+  const mergedByType = {};
+  const order = [];
+
+  function addAttachments(attachments, prefix) {
+    normalizeKaramayAttachments(attachments).forEach(function(attachment, index) {
+      const key = getKaramayAttachmentDocumentType(attachment, index) ||
+        String(attachment.file_name || attachment.name || prefix + "-" + index).trim();
+      if (!Object.prototype.hasOwnProperty.call(mergedByType, key)) order.push(key);
+      mergedByType[key] = attachment;
+    });
+  }
+
+  addAttachments(existingAttachments, "existing");
+  addAttachments(replacementAttachments, "replacement");
+  return order.map(function(key) { return mergedByType[key]; });
+}
+
+function hasRequiredKaramayAttachments(attachments) {
+  const types = normalizeKaramayAttachments(attachments).map(function(attachment, index) {
+    return getKaramayAttachmentDocumentType(attachment, index);
+  });
+  return types.indexOf("Death Certificate") > -1 && types.indexOf("Beneficiary Valid ID") > -1;
+}
+
+function getKaramayAttachmentDataMeta() {
+  return getSheetMetadata(SHEETS.karamayAttachmentData, KARAMAY_ATTACHMENT_DATA_HEADERS);
+}
+
+function getAttachmentInlineData(attachment) {
+  return String(
+    attachment && (attachment.file_data || attachment.dataUrl || attachment.data_url) || ""
+  );
+}
+
+function hydrateKaramayAttachments(attachments, attachmentDataMeta) {
+  const normalized = normalizeKaramayAttachments(attachments);
+  if (!normalized.length) return [];
+
+  const meta = attachmentDataMeta || getKaramayAttachmentDataMeta();
+  let chunksByStorageId = meta.karamayChunksByStorageId;
+  if (!chunksByStorageId) {
+    chunksByStorageId = {};
+    for (let i = 1; i < meta.rows.length; i++) {
+      const row = meta.rows[i];
+      const storageId = normalizeValue(getCell(meta, row, ["StorageID"], 0, ""));
+      if (!storageId) continue;
+      if (!chunksByStorageId[storageId]) chunksByStorageId[storageId] = [];
+      chunksByStorageId[storageId].push({
+        index: Number(getCell(meta, row, ["ChunkIndex"], 6, 0)),
+        data: String(getCell(meta, row, ["ChunkData"], 7, ""))
+      });
+    }
+    meta.karamayChunksByStorageId = chunksByStorageId;
+  }
+
+  return normalized.map(function(attachment) {
+    const hydrated = JSON.parse(JSON.stringify(attachment || {}));
+    const storageId = normalizeValue(hydrated.storage_id || hydrated.storageId);
+    if (!getAttachmentInlineData(hydrated) && storageId && chunksByStorageId[storageId]) {
+      hydrated.file_data = chunksByStorageId[storageId]
+        .sort(function(a, b) { return a.index - b.index; })
+        .map(function(chunk) { return chunk.data; })
+        .join("");
+    }
+    return hydrated;
+  });
+}
+
+// Store attachment data in chunk rows on a separate spreadsheet tab. The
+// claim row keeps only small metadata references, avoiding the per-cell text
+// limit while creating no Google Drive files.
+function stageKaramayAttachmentsInSheet(claimId, attachments) {
+  const meta = getKaramayAttachmentDataMeta();
+  const storedAttachments = [];
+  const rowsToAppend = [];
+  const storageIds = [];
+  const timestamp = new Date().getTime();
+
+  normalizeKaramayAttachments(attachments).forEach(function(attachment, attachmentIndex) {
+    const storedAttachment = JSON.parse(JSON.stringify(attachment || {}));
+    const inlineData = getAttachmentInlineData(storedAttachment);
+
+    if (inlineData.indexOf("data:") === 0 && inlineData.indexOf(",") > -1) {
+      const storageId = String(claimId) + "-" + timestamp + "-" + attachmentIndex;
+      const documentType = getKaramayAttachmentDocumentType(storedAttachment, attachmentIndex);
+      storageIds.push(storageId);
+
+      for (let offset = 0, chunkIndex = 0; offset < inlineData.length; offset += KARAMAY_ATTACHMENT_CHUNK_SIZE, chunkIndex++) {
+        rowsToAppend.push([
+          storageId,
+          String(claimId),
+          documentType,
+          storedAttachment.file_name || storedAttachment.name || "attachment",
+          storedAttachment.file_type || storedAttachment.type || "application/octet-stream",
+          Number(storedAttachment.file_size || storedAttachment.size || 0),
+          chunkIndex,
+          inlineData.slice(offset, offset + KARAMAY_ATTACHMENT_CHUNK_SIZE)
+        ]);
+      }
+
+      storedAttachment.storage_id = storageId;
+      storedAttachment.storage = "sheet_chunks";
+      delete storedAttachment.file_data;
+      delete storedAttachment.dataUrl;
+      delete storedAttachment.data_url;
+      delete storedAttachment.drive_file_id;
+      delete storedAttachment.url;
+    }
+
+    storedAttachments.push(storedAttachment);
+  });
+
+  if (rowsToAppend.length) {
+    meta.sheet
+      .getRange(meta.sheet.getLastRow() + 1, 1, rowsToAppend.length, KARAMAY_ATTACHMENT_DATA_HEADERS.length)
+      .setValues(rowsToAppend);
+  }
+
+  return { attachments: storedAttachments, storageIds: storageIds };
+}
+
+function cleanupOldKaramayAttachmentChunks(claimId, storageIdsToKeep) {
+  const meta = getKaramayAttachmentDataMeta();
+  const keep = {};
+  (storageIdsToKeep || []).forEach(function(storageId) { keep[String(storageId)] = true; });
+
+  for (let i = meta.rows.length - 1; i >= 1; i--) {
+    const row = meta.rows[i];
+    const rowClaimId = normalizeValue(getCell(meta, row, ["ClaimID"], 1, ""));
+    const storageId = normalizeValue(getCell(meta, row, ["StorageID"], 0, ""));
+    if (rowClaimId === String(claimId) && !keep[storageId]) {
+      meta.sheet.deleteRow(i + 1);
+    }
+  }
+}
+
+function claimRowToLegacy(meta, row, includeAttachments) {
   const dateStamp = getCell(meta, row, ["DateStamp", "Date Stamp", "DateFiled", "Date Filed", "CreatedAt", "LastUpdated"], 11, "");
   const dateAdmitted = getCell(meta, row, ["DateAdmitted", "Date Admitted"], 21, "");
   const dateDischarged = getCell(meta, row, ["DateDischarged", "Date Discharged"], 22, "");
@@ -516,7 +648,9 @@ function claimRowToLegacy(meta, row) {
     getCell(meta, row, ["BranchId", "Branch ID", "Branch"], 13, ""),
     getCell(meta, row, ["Notes", "Remarks"], 14, ""),
     getCell(meta, row, ["FinanceCheckedBy", "Finance Checked By"], 15, ""),
-    parseAttachments(getCell(meta, row, ["Attachments", "HCAttachments"], 16, "")),
+    includeAttachments === false
+      ? []
+      : parseAttachments(getCell(meta, row, ["Attachments", "HCAttachments"], 16, "")),
     getCell(meta, row, ["MemberID", "Member ID"], 17, ""),
     getCell(meta, row, ["Segmentation"], 18, ""),
     getCell(meta, row, ["Branch"], 19, ""),
@@ -528,7 +662,7 @@ function claimRowToLegacy(meta, row) {
   ];
 }
 
-function getRequests() {
+function getRequests(includeAttachments) {
   try {
     const meta = getSheetMetadata(SHEETS.claims, CLAIM_HEADERS);
     const rows = [CLAIM_HEADERS];
@@ -536,7 +670,7 @@ function getRequests() {
     for (let i = 1; i < meta.rows.length; i++) {
       const claimId = getCell(meta, meta.rows[i], ["ClaimID", "Claim ID", "ID", "RequestID"], 0, "");
       if (!claimId) continue;
-      rows.push(claimRowToLegacy(meta, meta.rows[i]));
+      rows.push(claimRowToLegacy(meta, meta.rows[i], includeAttachments));
     }
 
     return rows;
@@ -546,7 +680,7 @@ function getRequests() {
   }
 }
 
-function karamayClaimRowToLegacy(meta, row) {
+function karamayClaimRowToLegacy(meta, row, attachmentDataMeta, includeAttachments) {
   return [
     getCell(meta, row, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, ""),
     getCell(meta, row, ["MemberName", "Member Name"], 1, ""),
@@ -564,25 +698,66 @@ function karamayClaimRowToLegacy(meta, row) {
     getCell(meta, row, ["BranchManagerReviewedBy", "Branch Manager Reviewed By"], 13, ""),
     getCell(meta, row, ["SavingsCreditApprovedBy", "Savings Credit Approved By", "ApprovedBy"], 14, ""),
     getCell(meta, row, ["Notes", "Remarks"], 15, ""),
-    parseAttachments(getCell(meta, row, ["Attachments"], 16, ""))
+    includeAttachments === false
+      ? []
+      : hydrateKaramayAttachments(
+          parseAttachments(getCell(meta, row, ["Attachments"], 16, "")),
+          attachmentDataMeta
+        )
   ];
 }
 
-function getKaramayClaims() {
+function getKaramayClaims(includeAttachments) {
   try {
     const meta = getSheetMetadata(SHEETS.karamayClaims, KARAMAY_CLAIM_HEADERS);
+    const attachmentDataMeta = includeAttachments === false ? null : getKaramayAttachmentDataMeta();
     const rows = [KARAMAY_CLAIM_HEADERS];
 
     for (let i = 1; i < meta.rows.length; i++) {
       const claimId = getCell(meta, meta.rows[i], ["ClaimID", "Claim ID", "ID", "RequestID"], 0, "");
       if (!claimId) continue;
-      rows.push(karamayClaimRowToLegacy(meta, meta.rows[i]));
+      rows.push(karamayClaimRowToLegacy(meta, meta.rows[i], attachmentDataMeta, includeAttachments));
     }
 
     return rows;
   } catch (err) {
     console.error("getKaramayClaims error:", err);
     return [KARAMAY_CLAIM_HEADERS];
+  }
+}
+
+function getRequestAttachments(requestId) {
+  try {
+    const meta = getSheetMetadata(SHEETS.claims, CLAIM_HEADERS);
+    const found = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, requestId);
+    if (!found) return { success: false, message: "Claim not found." };
+
+    return {
+      success: true,
+      request_id: requestId,
+      attachments: parseAttachments(getCell(meta, found.row, ["Attachments", "HCAttachments"], 16, ""))
+    };
+  } catch (err) {
+    return { success: false, message: "Error: " + err.toString() };
+  }
+}
+
+function getKaramayClaimAttachments(requestId) {
+  try {
+    const meta = getSheetMetadata(SHEETS.karamayClaims, KARAMAY_CLAIM_HEADERS);
+    const found = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, requestId);
+    if (!found) return { success: false, message: "Karamay claim not found." };
+
+    return {
+      success: true,
+      request_id: requestId,
+      attachments: hydrateKaramayAttachments(
+        parseAttachments(getCell(meta, found.row, ["Attachments"], 16, "")),
+        getKaramayAttachmentDataMeta()
+      )
+    };
+  } catch (err) {
+    return { success: false, message: "Error: " + err.toString() };
   }
 }
 
@@ -608,8 +783,7 @@ function createKaramayClaim(data) {
         return { success: false, message: "Please upload the death certificate and valid ID attachments." };
       }
 
-      // process attachments: save file_data to Drive and replace with drive links
-      const processedAttachments = saveAttachmentsToDrive(Array.isArray(attachments) ? attachments : []);
+      const stagedAttachments = stageKaramayAttachmentsInSheet(claimId, attachments);
 
       appendObjectRow(meta.sheet, meta, {
         ClaimID: claimId,
@@ -628,8 +802,10 @@ function createKaramayClaim(data) {
         BranchManagerReviewedBy: "",
         SavingsCreditApprovedBy: "",
         Notes: "",
-        Attachments: JSON.stringify(processedAttachments)
+        Attachments: JSON.stringify(stagedAttachments.attachments)
       });
+
+      cleanupOldKaramayAttachmentChunks(claimId, stagedAttachments.storageIds);
 
       return { success: true, request_id: claimId, claimID: claimId };
     });
@@ -645,20 +821,42 @@ function editKaramayClaim(data) {
       const found = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, data.request_id);
 
       if (!found) {
+        Logger.log('editKaramayClaim: claim not found request_id=%s', String(data.request_id));
         return { success: false, message: "Claim not found." };
       }
 
-      const currentStatus = normalizeValue(getCell(meta, found.row, ["Status", "ClaimStatus", "Claim Status"], 10, ""));
-      const isReturned = currentStatus.toLowerCase().includes("return");
+      const statusHeaderIndex = getHeaderIndex(meta, ["Status", "ClaimStatus", "Claim Status"], 10);
+      const currentStatus = normalizeValue(getCell(
+        meta,
+        found.row,
+        ["Status", "ClaimStatus", "Claim Status"],
+        statusHeaderIndex,
+        ""
+      ));
+      const isReturned = currentStatus.toLowerCase().indexOf("return") > -1;
+
+      Logger.log('editKaramayClaim: request_id=%s statusHeaderIndex=%s currentStatus=%s isReturned=%s',
+        String(data.request_id),
+        String(statusHeaderIndex),
+        currentStatus,
+        String(isReturned));
+
       if (!isReturned) {
-        return { success: false, message: "Only returned claims can be edited." };
+        return { success: false, message: "Only returned Karamay claims can be edited." };
       }
 
-      const existingAttachments = parseAttachments(getCell(meta, found.row, ["Attachments"], 16, ""));
+      const attachmentDataMeta = getKaramayAttachmentDataMeta();
+      const existingAttachments = hydrateKaramayAttachments(
+        parseAttachments(getCell(meta, found.row, ["Attachments"], 16, "")),
+        attachmentDataMeta
+      );
       const attachments = Array.isArray(data.attachments) ? data.attachments : [];
-      // merge attachments as client expects; if new attachments contain file_data, save them to Drive
-      const merged = attachments.length ? attachments : existingAttachments;
-      const finalAttachments = saveAttachmentsToDrive(Array.isArray(merged) ? merged : []);
+      Logger.log('editKaramayClaim: request_id=%s attachmentsFromPayload=%s existingAttachments=%s',
+        String(data.request_id),
+        String(attachments.length),
+        String(existingAttachments.length));
+      // Merge on the server as well so an older client cannot drop the unchanged required document.
+      const merged = mergeKaramayAttachments(existingAttachments, attachments);
       const branchId = firstPresent(data.memberBranchId, data.branchid, data.tellerBranchId);
       const modeOfRelease = firstPresent(data.modeOfRelease, data.mode_of_release, data.ModeOfRelease, "Actual Delivery (Bouquet and Cash)");
       const actor = firstPresent(data.tellerName, data.tellerEmail);
@@ -671,9 +869,11 @@ function editKaramayClaim(data) {
         return { success: false, message: "Please complete the beneficiary/requestor information." };
       }
 
-      if (!finalAttachments.length) {
+      if (!hasRequiredKaramayAttachments(merged)) {
         return { success: false, message: "Please upload the death certificate and valid ID attachments." };
       }
+
+      const stagedAttachments = stageKaramayAttachmentsInSheet(data.request_id, merged);
 
       const updates = {
         MemberName: data.memberName || "",
@@ -690,10 +890,11 @@ function editKaramayClaim(data) {
         BranchManagerReviewedBy: "",
         SavingsCreditApprovedBy: "",
         Notes: "",
-        Attachments: JSON.stringify(finalAttachments)
+        Attachments: JSON.stringify(stagedAttachments.attachments)
       };
 
-      setObjectFields(meta.sheet, found.rowNumber, meta, updates);
+      setObjectFieldsAtomic(meta.sheet, found.rowNumber, meta, found.row, updates);
+      cleanupOldKaramayAttachmentChunks(data.request_id, stagedAttachments.storageIds);
       return { success: true };
     });
   } catch (err) {
@@ -925,7 +1126,7 @@ function updateStatus(data) {
 }
 
 function getDashboardCounts() {
-  const rows = getRequests();
+  const rows = getRequests(false);
   let awaiting = 0;
   let approved = 0;
   let rejected = 0;
@@ -1190,10 +1391,10 @@ function updateUser(data) {
   }
 }
 
-function getMembers() {
+function getMembers(branchMapOverride) {
   try {
     const meta = getSheetMetadata(SHEETS.members, MEMBER_HEADERS);
-    const branchMap = getBranchMap();
+    const branchMap = branchMapOverride || getBranchMap();
     const members = [];
 
     for (let i = 1; i < meta.rows.length; i++) {
@@ -1427,6 +1628,33 @@ function getSegmentationRates() {
   }
 }
 
+function getTellerReferenceData() {
+  try {
+    const branchesResult = getBranches();
+    const branchMap = {};
+    (branchesResult.branches || []).forEach(function(branch) {
+      branchMap[normalizeValue(branch.branchID)] = branch.branchName || branch.branchID;
+    });
+    const membersResult = getMembers(branchMap);
+    const hospitalsResult = getHospitals();
+    const ratesResult = getSegmentationRates();
+
+    const failedResult = [membersResult, branchesResult, hospitalsResult, ratesResult]
+      .filter(function(result) { return !result || result.success === false; })[0];
+    if (failedResult) return failedResult;
+
+    return {
+      success: true,
+      members: membersResult.members || [],
+      branches: branchesResult.branches || [],
+      hospitals: hospitalsResult.hospitals || [],
+      rates: ratesResult.rates || []
+    };
+  } catch (err) {
+    return { success: false, message: "Error: " + err.toString() };
+  }
+}
+
 function getSettings() {
   try {
     const meta = getSheetMetadata(SHEETS.settings, SETTINGS_HEADERS);
@@ -1569,7 +1797,9 @@ function handleAction(data) {
     case "editRequest":
       return editRequest(data);
     case "getRequests":
-      return getRequests();
+      return getRequests(data.includeAttachments !== false);
+    case "getRequestAttachments":
+      return getRequestAttachments(data.request_id);
     case "updateStatus":
       return updateStatus(data);
     case "createKaramayClaim":
@@ -1577,7 +1807,9 @@ function handleAction(data) {
     case "editKaramayClaim":
       return editKaramayClaim(data);
     case "getKaramayClaims":
-      return getKaramayClaims();
+      return getKaramayClaims(data.includeAttachments !== false);
+    case "getKaramayClaimAttachments":
+      return getKaramayClaimAttachments(data.request_id);
     case "getDashboardCounts":
       return getDashboardCounts();
     case "getSettings":
@@ -1602,6 +1834,8 @@ function handleAction(data) {
       return getHospitalDiagnostics();
     case "getSegmentationRates":
       return getSegmentationRates();
+    case "getTellerReferenceData":
+      return getTellerReferenceData();
     default:
       return { success: false, message: "Unknown action: " + String(action || "") };
   }
@@ -1635,6 +1869,25 @@ function parseGetData(e) {
   return params;
 }
 
+function parseFormEncodedString(encoded) {
+  const params = {};
+  const parts = String(encoded || "").split("&");
+
+  parts.forEach(function(part) {
+    if (!part) return;
+    const pair = part.split("=");
+    const rawKey = pair[0] || "";
+    const rawValue = pair.slice(1).join("=");
+    const key = decodeURIComponent(rawKey.replace(/\+/g, "%20"));
+    const value = rawValue ? decodeURIComponent(rawValue.replace(/\+/g, "%20")) : "";
+    if (key) {
+      params[key] = value;
+    }
+  });
+
+  return params;
+}
+
 function doGet(e) {
   try {
     const params = e && e.parameter ? e.parameter : {};
@@ -1661,15 +1914,32 @@ function parsePostData(e) {
     try {
       return JSON.parse(contents);
     } catch (err) {
-      // If the body is form-encoded (e.g. payload=<json>), prefer the payload parameter
-      if (e && e.parameter && e.parameter.payload) {
+      const formParams = parseFormEncodedString(contents);
+      if (formParams.payload) {
         try {
-          return JSON.parse(e.parameter.payload);
-        } catch (err2) {
-          // fall through
+          return JSON.parse(formParams.payload);
+        } catch (nestedErr) {
+          // fall through to parameter parsing
         }
       }
-      // As a last resort, return parsed parameters
+
+      if (e && e.parameter && e.parameter.payload) {
+        try {
+          return JSON.parse(String(e.parameter.payload));
+        } catch (nestedErr) {
+          try {
+            const decodedPayload = String(e.parameter.payload).replace(/\+/g, "%20");
+            return JSON.parse(decodeURIComponent(decodedPayload));
+          } catch (nestedErr2) {
+            // fall through
+          }
+        }
+      }
+
+      if (Object.keys(formParams).length) {
+        return formParams;
+      }
+
       return e && e.parameter ? e.parameter : {};
     }
   }
@@ -1688,8 +1958,21 @@ function doPost(e) {
       // ignore logging errors
     }
     const data = parsePostData(e);
-    try { Logger.log('doPost parsed action: ' + String(data && data.action)); } catch (ignore) {}
-    return jsonOutput(handleAction(data));
+    let result;
+    try {
+      const action = String(data && data.action || "");
+      const attachmentsCount = Array.isArray(data && data.attachments) ? data.attachments.length : 0;
+      result = handleAction(data);
+      Logger.log('doPost action=%s request_id=%s attachments=%s result=%s message=%s',
+        action,
+        String(data && data.request_id || data && data.claim_id || ""),
+        String(attachmentsCount),
+        String(result && result.success),
+        String(result && result.message || ""));
+    } catch (innerErr) {
+      result = { success: false, message: innerErr.toString() };
+    }
+    return jsonOutput(result);
   } catch (err) {
     console.error("doPost error:", err);
     return jsonOutput({ success: false, message: err.toString() });

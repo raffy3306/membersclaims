@@ -1,4 +1,4 @@
-const API = "https://script.google.com/macros/s/AKfycbwJ2XWWIiI83MenTIkaGLpyk0ZOY6emo7huXmLv6iyF8iy1Xz72qflVY69DAPr-UerbaA/exec";
+const API = "https://script.google.com/macros/s/AKfycbzuU4Ke9-SyyYJqJ47s3ATresVevJ4GAJqQE23hY0iETO2tgCmi9YkhQ_X1RrlcjlWomA/exec";
 // Apps Script web apps reject CORS preflight OPTIONS requests, so POST JSON as plain text.
 const APPS_SCRIPT_JSON_HEADERS = { "Content-Type": "text/plain;charset=utf-8" };
 
@@ -307,6 +307,58 @@ async function readRequestAttachments(inputId = "requestAttachments") {
     file_size: file.size,
     file_data: await readFileAsDataUrl(file)
   })));
+}
+
+function getKaramayAttachmentDocumentType(attachment, index = -1) {
+  const explicitType = String(
+    attachment && (attachment.document_type || attachment.documentType) || ""
+  ).trim();
+  const normalizedType = explicitType.toLowerCase().replace(/[^a-z0-9]+/g, " ").trim();
+
+  if (normalizedType.includes("death") && normalizedType.includes("certificate")) {
+    return "Death Certificate";
+  }
+
+  if (normalizedType.includes("valid id") || normalizedType.includes("beneficiary id")) {
+    return "Beneficiary Valid ID";
+  }
+
+  if (explicitType) return explicitType;
+  if (index === 0) return "Death Certificate";
+  if (index === 1) return "Beneficiary Valid ID";
+  return "";
+}
+
+function normalizeKaramayAttachments(attachments) {
+  return normalizeAttachments(attachments).map(function(attachment, index) {
+    const documentType = getKaramayAttachmentDocumentType(attachment, index);
+    return documentType ? { ...attachment, document_type: documentType } : { ...attachment };
+  });
+}
+
+function mergeKaramayAttachments(existingAttachments, replacementAttachments) {
+  const merged = new Map();
+
+  normalizeKaramayAttachments(existingAttachments).forEach(function(attachment, index) {
+    const key = getKaramayAttachmentDocumentType(attachment, index) ||
+      String(attachment.file_name || attachment.name || `existing-${index}`).trim();
+    merged.set(key, attachment);
+  });
+
+  normalizeKaramayAttachments(replacementAttachments).forEach(function(attachment, index) {
+    const key = getKaramayAttachmentDocumentType(attachment, index) ||
+      String(attachment.file_name || attachment.name || `replacement-${index}`).trim();
+    merged.set(key, attachment);
+  });
+
+  return Array.from(merged.values());
+}
+
+function hasRequiredKaramayAttachments(attachments) {
+  const types = normalizeKaramayAttachments(attachments).map(function(attachment, index) {
+    return getKaramayAttachmentDocumentType(attachment, index);
+  });
+  return types.includes("Death Certificate") && types.includes("Beneficiary Valid ID");
 }
 
 function calculateHospitalDays(dateAdmitted, dateDischarged) {
@@ -1683,7 +1735,7 @@ function closeRequestModal() {
 function populateKaramayClaimForm(row) {
   if (!Array.isArray(row)) return;
   editingKaramayClaimId = row[0] || null;
-  editingKaramayClaimAttachments = normalizeAttachments(row[16] || []);
+  editingKaramayClaimAttachments = normalizeKaramayAttachments(row[16] || []);
 
   setInputValue("karamayMemberName", row[1] || "");
   setInputValue("karamayMemberBranchId", row[2] || localStorage.getItem("branchid") || "");
@@ -1701,11 +1753,18 @@ function populateKaramayClaimForm(row) {
   if (submitButton) submitButton.textContent = "Save Changes";
 }
 
-function openEditKaramayClaim(id) {
+async function openEditKaramayClaim(id) {
   const row = (allKaramayClaims || []).find(item => Array.isArray(item) && String(item[0]) === String(id));
   const status = String(row?.[10] || "").trim();
   const isReturned = isReturnedStatus(status);
   if (!row || !isReturned) return;
+
+  try {
+    row[16] = await loadClaimAttachments(id, true);
+  } catch (err) {
+    alert(err.message || "Unable to load the existing Karamay attachments.");
+    return;
+  }
 
   closeAllModals();
   const modal = document.getElementById("karamayModal");
@@ -1846,19 +1905,39 @@ async function loadTellerReferenceData() {
     hospitalSelect.innerHTML = '<option value="">Loading hospitals...</option>';
   }
 
-  const [membersRes, branchesRes, hospitalsRes, ratesRes] = await Promise.all([
-    fetch(API, { method: "POST", body: JSON.stringify({ action: "getMembers" }) }),
-    fetch(API, { method: "POST", body: JSON.stringify({ action: "getBranches" }) }),
-    fetch(API, { method: "POST", body: JSON.stringify({ action: "getHospitals" }) }),
-    fetch(API, { method: "POST", body: JSON.stringify({ action: "getSegmentationRates" }) })
-  ]);
+  const cacheKey = "tellerReferenceData:v1";
+  let referenceData = null;
+  try {
+    const cached = JSON.parse(sessionStorage.getItem(cacheKey) || "null");
+    if (cached && cached.expiresAt > Date.now() && cached.data) referenceData = cached.data;
+  } catch (err) {
+    sessionStorage.removeItem(cacheKey);
+  }
 
-  const [membersData, branchesData, hospitalsData, ratesData] = await Promise.all([
-    parseApiJsonResponse(membersRes),
-    parseApiJsonResponse(branchesRes),
-    parseApiJsonResponse(hospitalsRes),
-    parseApiJsonResponse(ratesRes)
-  ]);
+  if (!referenceData) {
+    const bundledRes = await fetch(API, {
+      method: "POST",
+      headers: APPS_SCRIPT_JSON_HEADERS,
+      body: JSON.stringify({ action: "getTellerReferenceData" })
+    });
+    referenceData = await parseApiJsonResponse(bundledRes);
+
+    if (referenceData && referenceData.success) {
+      try {
+        sessionStorage.setItem(cacheKey, JSON.stringify({
+          expiresAt: Date.now() + (5 * 60 * 1000),
+          data: referenceData
+        }));
+      } catch (err) {
+        console.warn("Unable to cache teller reference data:", err);
+      }
+    }
+  }
+
+  const membersData = { success: Boolean(referenceData?.success), members: referenceData?.members || [], message: referenceData?.message };
+  const branchesData = { success: Boolean(referenceData?.success), branches: referenceData?.branches || [], message: referenceData?.message };
+  const hospitalsData = { success: Boolean(referenceData?.success), hospitals: referenceData?.hospitals || [], message: referenceData?.message };
+  const ratesData = { success: Boolean(referenceData?.success), rates: referenceData?.rates || [], message: referenceData?.message };
 
   if (membersData.success) allMembers = membersData.members || [];
   else console.warn("Unable to load members:", membersData.message);
@@ -2044,7 +2123,7 @@ async function loadRequests(tableId) {
   const res = await fetch(API, {
     method: "POST",
     headers: APPS_SCRIPT_JSON_HEADERS,
-    body: JSON.stringify({ action: "getRequests" })
+    body: JSON.stringify({ action: "getRequests", includeAttachments: false })
   });
 
   const data = sortRequestDataNewestFirst(await parseApiJsonResponse(res));
@@ -2345,6 +2424,63 @@ function getStatusClass(status) {
 // 📦 STORE DATA FOR MODAL
 let allRequests = [];
 let workflowRequestsPromise = null;
+const claimAttachmentCache = new Map();
+
+async function loadClaimAttachments(requestId, isKaramayClaim = false, forceRefresh = false) {
+  const cacheKey = `${isKaramayClaim ? "karamay" : "hospitalization"}:${requestId}`;
+  if (!forceRefresh && claimAttachmentCache.has(cacheKey)) {
+    return claimAttachmentCache.get(cacheKey);
+  }
+
+  const payload = {
+    action: isKaramayClaim ? "getKaramayClaimAttachments" : "getRequestAttachments",
+    request_id: requestId
+  };
+  let result;
+
+  try {
+    const response = await fetch(API, {
+      method: "POST",
+      headers: APPS_SCRIPT_JSON_HEADERS,
+      body: JSON.stringify(payload)
+    });
+    result = await parseApiJsonResponse(response);
+  } catch (fetchError) {
+    result = await callAppsScriptJsonp(payload, 45000);
+  }
+
+  if (!result || !result.success) {
+    throw new Error(result?.message || "Unable to load claim attachments.");
+  }
+
+  const attachments = isKaramayClaim
+    ? normalizeKaramayAttachments(result.attachments || [])
+    : normalizeAttachments(result.attachments || []);
+  claimAttachmentCache.set(cacheKey, attachments);
+
+  const rows = isKaramayClaim ? allKaramayClaims : allRequests;
+  const row = Array.isArray(rows)
+    ? rows.find(item => Array.isArray(item) && String(item[0]) === String(requestId))
+    : null;
+  if (row) row[16] = attachments;
+
+  return attachments;
+}
+
+function showClaimModalLoading(title) {
+  const modalContent = document.getElementById("modalContent");
+  if (modalContent) {
+    modalContent.innerHTML = `<div style="padding:30px; text-align:center; color:#64748b;">Loading ${escapeHtml(title)}...</div>`;
+  }
+  const modal = document.getElementById("modal");
+  if (modal) {
+    modal.style.display = "flex";
+    modal.style.pointerEvents = "auto";
+    modal.style.opacity = "1";
+    modal.classList.add("active");
+    modal.setAttribute("aria-hidden", "false");
+  }
+}
 
 function normalizeValue(value) {
   return String(value ?? "").trim().toLowerCase();
@@ -2630,13 +2766,7 @@ function getBranchQueueCopy(role = getCurrentRole()) {
 }
 
 async function loadStyledTable(tableId, role) {
-  const res = await fetch(API, {
-    method: "POST",
-    headers: APPS_SCRIPT_JSON_HEADERS,
-    body: JSON.stringify({ action: "getRequests" })
-  });
-
-  const data = sortRequestDataNewestFirst(await parseApiJsonResponse(res));
+  const data = await loadWorkflowRequests();
   allRequests = data;
 
   let html = "";
@@ -3226,7 +3356,7 @@ function loadBranchSubmitted() {
   const branchId = localStorage.getItem("branchid");
   fetch(API, {
     method: 'POST',
-    body: JSON.stringify({ action: 'getRequests' })
+    body: JSON.stringify({ action: 'getRequests', includeAttachments: false })
   })
     .then(res => res.json())
     .then(data => {
@@ -4264,30 +4394,13 @@ async function submitKaramayClaim() {
   ];
 
   const isEdit = Boolean(editingKaramayClaimId);
-  let attachmentsToSend;
-  if (attachments.length) {
-    // If editing, merge new attachments with existing ones so unchanged files are preserved.
-    if (isEdit && Array.isArray(editingKaramayClaimAttachments) && editingKaramayClaimAttachments.length) {
-      const map = {};
-      // index existing by document_type when available, else by file_name
-      editingKaramayClaimAttachments.forEach(a => {
-        const key = String(a.document_type || a.file_name || "").trim() || JSON.stringify(a);
-        map[key] = a;
-      });
-      attachments.forEach(a => {
-        const key = String(a.document_type || a.file_name || "").trim() || JSON.stringify(a);
-        map[key] = a;
-      });
-      attachmentsToSend = Object.keys(map).map(k => map[k]);
-    } else {
-      attachmentsToSend = attachments;
-    }
-  } else {
-    attachmentsToSend = editingKaramayClaimAttachments;
-  }
+  const attachmentsToSend = isEdit
+    ? mergeKaramayAttachments(editingKaramayClaimAttachments, attachments)
+    : normalizeKaramayAttachments(attachments);
+  const savedRequestId = isEdit ? editingKaramayClaimId : generateID("KRM");
   const payload = {
     action: isEdit ? "editKaramayClaim" : "createKaramayClaim",
-    request_id: editingKaramayClaimId,
+    request_id: savedRequestId,
     memberName: getInputTrim("karamayMemberName"),
     memberBranchId: getInputTrim("karamayMemberBranchId") || localStorage.getItem("branchid") || "",
     memberAddress: getInputTrim("karamayMemberAddress"),
@@ -4313,12 +4426,11 @@ async function submitKaramayClaim() {
     return;
   }
 
-  if (!attachmentsToSend.length) {
+  if (!hasRequiredKaramayAttachments(attachmentsToSend)) {
     alert("Please upload both required attachments.");
     return;
   }
 
-  const savedRequestId = isEdit ? editingKaramayClaimId : generateID("KRM");
   const localRow = [
     savedRequestId,
     payload.memberName,
@@ -4339,17 +4451,42 @@ async function submitKaramayClaim() {
     attachmentsToSend
   ];
 
+  async function verifyKaramayUpdate(attempts = 4, intervalMs = 1200) {
+    const expectedAttachments = normalizeKaramayAttachments(attachmentsToSend);
+    for (let attempt = 0; attempt < attempts; attempt++) {
+      await loadKaramayClaims(true);
+      const found = Array.isArray(allKaramayClaims)
+        ? allKaramayClaims.find(row => Array.isArray(row) && String(row[0]) === String(savedRequestId))
+        : null;
+      if (found) {
+        const status = String(found[10] || "").trim();
+        const savedAttachments = normalizeKaramayAttachments(found[16] || []);
+        const attachmentsSaved = expectedAttachments.every(function(expected, index) {
+          const expectedType = getKaramayAttachmentDocumentType(expected, index);
+          const expectedName = String(expected.file_name || expected.name || "").trim();
+          return savedAttachments.some(function(saved, savedIndex) {
+            const sameType = getKaramayAttachmentDocumentType(saved, savedIndex) === expectedType;
+            const savedName = String(saved.file_name || saved.name || "").trim();
+            return sameType && (!expectedName || savedName === expectedName);
+          });
+        });
+        if (status === "Pending" && attachmentsSaved) return true;
+      }
+      if (attempt < attempts - 1) {
+        await wait(intervalMs);
+      }
+    }
+    return false;
+  }
+
   async function attemptNoCorsWrite() {
+    console.log('Karamay fallback: attemptNoCorsWrite');
     await submitAppsScriptWrite(payload, 45000);
-    await wait(1200);
-    await loadKaramayClaims(true);
-    const found = Array.isArray(allKaramayClaims)
-      ? allKaramayClaims.some(row => Array.isArray(row) && String(row[0]) === String(savedRequestId))
-      : false;
-    return found;
+    return verifyKaramayUpdate();
   }
 
   async function attemptFormPost() {
+    console.log('Karamay fallback: attemptFormPost');
     const form = document.getElementById('karamayUploadForm');
     const payloadInput = document.getElementById('karamayUploadPayload');
     if (!form || !payloadInput) return false;
@@ -4357,10 +4494,7 @@ async function submitKaramayClaim() {
       payloadInput.value = JSON.stringify(payload);
       form.action = API;
       form.submit();
-      // Allow server time to process and refresh local view
-      await wait(1200);
-      await loadKaramayClaims(true);
-      return Array.isArray(allKaramayClaims) && allKaramayClaims.some(row => Array.isArray(row) && String(row[0]) === String(savedRequestId));
+      return verifyKaramayUpdate();
     } catch (err) {
       console.warn('Form POST fallback failed', err);
       return false;
@@ -4377,16 +4511,10 @@ async function submitKaramayClaim() {
 
     if (!data.success) {
       if (shouldUseKaramayLocalFallback(data)) {
-        // Try form POST fallback first (avoids CORS preflight and sends full body)
-        const formSaved = await attemptFormPost().catch(() => false);
-        if (!formSaved) {
-          const saved = await attemptNoCorsWrite().catch(() => false);
-          if (!saved) {
-            writeStoredKaramayClaim(localRow);
-            alert(isEdit ? "Karamay claim update saved locally. Deploy the backend update to sync this workflow for other users." : "Karamay claim saved locally. Deploy the backend update to sync this workflow for other users.");
-          } else {
-            alert(isEdit ? "Karamay claim updated and resubmitted for verification." : "Karamay claim forwarded to Branch Manager for review.");
-          }
+        const saved = await attemptNoCorsWrite().catch(() => false);
+        if (!saved) {
+          writeStoredKaramayClaim(localRow);
+          alert(isEdit ? "Karamay claim update saved locally. Deploy the backend update to sync this workflow for other users." : "Karamay claim saved locally. Deploy the backend update to sync this workflow for other users.");
         } else {
           alert(isEdit ? "Karamay claim updated and resubmitted for verification." : "Karamay claim forwarded to Branch Manager for review.");
         }
@@ -4400,13 +4528,13 @@ async function submitKaramayClaim() {
       closeKaramayModal();
     }
   } catch (err) {
-    console.warn("Karamay save failed, attempting form POST fallback then no-cors write:", err);
-    const formSaved = await attemptFormPost().catch(() => false);
-    if (!formSaved) {
-      const saved = await attemptNoCorsWrite().catch(() => false);
-      if (!saved) {
+    console.warn("Karamay save failed, attempting no-cors write fallback then form POST:", err);
+    const saved = await attemptNoCorsWrite().catch(() => false);
+    if (!saved) {
+      const formSavedFallback = await attemptFormPost().catch(() => false);
+      if (!formSavedFallback) {
         writeStoredKaramayClaim(localRow);
-        alert("Karamay claim saved locally because the backend could not be reached.");
+        alert("The Karamay update could not be verified on the server. A local copy was saved; refresh and check the claim before trying again.");
       } else {
         alert(isEdit ? "Karamay claim updated and resubmitted for verification." : "Karamay claim forwarded to Branch Manager for review.");
       }
@@ -4433,7 +4561,7 @@ async function loadKaramayClaims(forceRefresh = false) {
         const res = await fetch(API, {
           method: "POST",
           headers: APPS_SCRIPT_JSON_HEADERS,
-          body: JSON.stringify({ action: "getKaramayClaims" })
+          body: JSON.stringify({ action: "getKaramayClaims", includeAttachments: false })
         });
         const result = await parseApiJsonResponse(res);
 
@@ -4513,20 +4641,28 @@ function renderKaramayClaims() {
   if (count) count.innerText = `${rows.length} claim${rows.length !== 1 ? "s" : ""}`;
 }
 
-function openKaramayClaimModal(id) {
+async function openKaramayClaimModal(id) {
   const row = (allKaramayClaims || []).find(item => Array.isArray(item) && item[0] === id);
   if (!row) return;
 
-  const attachments = normalizeAttachments(row[16] ?? row[row.length - 1] ?? []);
+  showClaimModalLoading("Karamay claim details");
+  let attachments = [];
+  let attachmentLoadError = "";
+  try {
+    attachments = await loadClaimAttachments(id, true);
+  } catch (err) {
+    attachmentLoadError = err.message || "Unable to load attachments.";
+  }
   window.currentModalAttachments = attachments;
   const attachmentHtml = attachments.length
     ? attachments.map((attachment, index) => {
       const type = attachment.document_type ? `${escapeHtml(attachment.document_type)}: ` : "";
       return `<div style="margin-bottom: 8px;">${type}${renderAttachmentPreview(attachment, index)}</div>`;
     }).join("")
-    : '<span style="color:#777;">No attachments uploaded.</span>';
+    : `<span style="color:${attachmentLoadError ? "#b91c1c" : "#777"};">${escapeHtml(attachmentLoadError || "No attachments uploaded.")}</span>`;
 
   const dateFiled = formatDateTimeForDisplay(row[12]);
+  const status = String(row[10] || '').trim();
 
   const modalContent = document.getElementById("modalContent");
   if (modalContent) {
@@ -4603,8 +4739,6 @@ function openKaramayClaimModal(id) {
     modalFooter.querySelectorAll('.role-action-btn').forEach(btn => btn.remove());
 
     const role = getCurrentRole();
-    const status = String(row[10] || '').trim();
-
     if ((role === 'branch_manager' || role === 'membership_specialist') && status === 'Pending') {
       const returnBtn = document.createElement('button');
       returnBtn.className = 'btn red role-action-btn';
@@ -4831,11 +4965,12 @@ function renderClaimRow(r, extraColumn = "") {
   `;
 }
 
-function openModal(id) {
+async function openModal(id) {
   const r = allRequests.find(x => Array.isArray(x) && x[0] === id);
   if (!r) return;
 
   window.currentRequestId = id;
+  showClaimModalLoading("claim details");
 
   const dateStr = r[11] ? new Date(r[11]).toLocaleDateString() : "N/A";
   const encodedBy = r[8] || localStorage.getItem("fullname") || "Unknown";
@@ -4843,11 +4978,17 @@ function openModal(id) {
   const financeCheckedBy = r[15] || "N/A";
   const approverName = r[10] || "N/A";
   const workflowNotes = r[14] || "";
-  const attachments = normalizeAttachments(r[16] ?? r[r.length - 1] ?? []);
+  let attachments = [];
+  let attachmentLoadError = "";
+  try {
+    attachments = await loadClaimAttachments(id, false);
+  } catch (err) {
+    attachmentLoadError = err.message || "Unable to load attachments.";
+  }
   window.currentModalAttachments = attachments;
   const attachmentHtml = attachments.length
     ? attachments.map(renderAttachmentPreview).join("")
-    : '<span style="color:#777;">No attachments uploaded.</span>';
+    : `<span style="color:${attachmentLoadError ? "#b91c1c" : "#777"};">${escapeHtml(attachmentLoadError || "No attachments uploaded.")}</span>`;
 
   document.getElementById("modalContent").innerHTML = `
     <div style="margin-bottom: 20px; border-bottom: 1px solid #eee; padding-bottom: 15px;">
@@ -5191,7 +5332,7 @@ async function loadWorkflowRequests(forceRefresh = false) {
   }
 
   if (!workflowRequestsPromise || forceRefresh) {
-    workflowRequestsPromise = callAppsScriptJsonp({ action: "getRequests" })
+    workflowRequestsPromise = callAppsScriptJsonp({ action: "getRequests", includeAttachments: false })
       .then(data => {
         allRequests = sortRequestDataNewestFirst(data);
         return allRequests;
@@ -5504,7 +5645,7 @@ async function printRequest() {
     try {
       const requestsRes = await fetch(API, {
         method: "POST",
-        body: JSON.stringify({ action: "getRequests" })
+        body: JSON.stringify({ action: "getRequests", includeAttachments: false })
       });
       const requestsData = await requestsRes.json();
       if (Array.isArray(requestsData)) {
