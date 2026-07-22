@@ -3010,7 +3010,7 @@ function openModal(id) {
   if (rejectBtn) rejectBtn.style.display = "none";
 
   // Add role-specific buttons to modal footer
-  const modalFooter = document.querySelector(".modal-footer");
+  const modalFooter = document.querySelector("#modal .modal-footer");
   if (modalFooter) {
     // Check if buttons already exist, remove them
     const existingBtns = modalFooter.querySelectorAll('.role-action-btn');
@@ -5088,7 +5088,7 @@ async function openKaramayClaimModal(id) {
     `;
   }
 
-  const modalFooter = document.querySelector('.modal-footer');
+  const modalFooter = document.querySelector('#modal .modal-footer');
   if (modalFooter) {
     window.currentRequestId = id;
 
@@ -5448,7 +5448,7 @@ async function openModal(id) {
   if (approveBtn) approveBtn.style.display = "none";
   if (rejectBtn) rejectBtn.style.display = "none";
 
-  const modalFooter = document.querySelector(".modal-footer");
+  const modalFooter = document.querySelector("#modal .modal-footer");
   if (modalFooter) {
     modalFooter.querySelectorAll(".role-action-btn").forEach(btn => btn.remove());
     const role = getCurrentRole();
