@@ -1,4 +1,4 @@
-const API = "https://script.google.com/macros/s/AKfycbxQUka9BTYrVuZWp296KU_JMvVwDWRH84hiasobJEcvHb5Bs04h09MkOV3y0oxYgQkUZg/exec";
+const API = "https://script.google.com/macros/s/AKfycbxxNRfNxtnj39C-nCT7XddGijbZcmA-Ip0JRS0X6C7jaXRJBz5MdGgwelk2CJ4RW7vdeg/exec";
 // Apps Script web apps reject CORS preflight OPTIONS requests, so POST JSON as plain text.
 const APPS_SCRIPT_JSON_HEADERS = { "Content-Type": "text/plain;charset=utf-8" };
 
@@ -686,6 +686,17 @@ async function supabaseCreateKaramayClaim(data) {
     return { success: false, message: "Please upload the death certificate and valid ID attachments." };
   }
 
+  const { data: existingClaim, error: existingClaimError } = await db
+    .from(SUPABASE_TABLES.karamayClaims)
+    .select("claim_id")
+    .eq("claim_id", request.claim_id)
+    .maybeSingle();
+
+  if (existingClaimError) throw existingClaimError;
+  if (existingClaim) {
+    return { success: true, request_id: request.claim_id, duplicate: true };
+  }
+
   const { error } = await db
     .from(SUPABASE_TABLES.karamayClaims)
     .insert(request);
@@ -773,6 +784,18 @@ async function supabaseCreateRequest(data) {
     return { success: false, message: "No daily rate is configured for this member's segmentation." };
   }
 
+  const claimId = data.request_id || generateID();
+  const { data: existingClaim, error: existingClaimError } = await db
+    .from(SUPABASE_TABLES.claims)
+    .select("claim_id")
+    .eq("claim_id", claimId)
+    .maybeSingle();
+
+  if (existingClaimError) throw existingClaimError;
+  if (existingClaim) {
+    return { success: true, request_id: claimId, duplicate: true };
+  }
+
   const claimYear = getClaimYear(data.dateAdmitted);
   const yearlyClaimCount = await supabaseCountYearlyClaims(data.memberID, claimYear);
   if (yearlyClaimCount >= MAX_CLAIMS_PER_YEAR) {
@@ -782,7 +805,7 @@ async function supabaseCreateRequest(data) {
   const claimableAmount = days.payableDays * dailyRate;
   const now = new Date().toISOString();
   const request = {
-    claim_id: data.request_id || generateID(),
+    claim_id: claimId,
     date_filed: now,
     member_id: data.memberID,
     member_name: data.memberName || "",
@@ -1437,6 +1460,9 @@ let allKaramayClaims = [KARAMAY_CLAIM_HEADERS];
 let karamayClaimsPromise = null;
 let editingKaramayClaimId = null;
 let editingKaramayClaimAttachments = [];
+let isRequestSubmitting = false;
+let requestSubmissionId = null;
+let isKaramayClaimSubmitting = false;
 let segmentationRates = {};
 let editingUserEmail = null;
 
@@ -2112,6 +2138,7 @@ function bindTellerClaimForm() {
 
 function resetRequestForm() {
   editingRequestId = null;
+  requestSubmissionId = null;
   const requestIdInput = document.getElementById("requestId");
   if (requestIdInput) requestIdInput.value = "";
 
@@ -2228,6 +2255,33 @@ async function loadRequests(tableId) {
 
 // ➕ SUBMIT REQUEST (TELLER)
 async function submitRequest() {
+  if (isRequestSubmitting) return;
+
+  isRequestSubmitting = true;
+  const submitButton = document.getElementById("requestSubmitButton");
+  const submitButtonText = submitButton?.innerText || "Submit Claim";
+  if (submitButton) {
+    submitButton.disabled = true;
+    submitButton.setAttribute("aria-busy", "true");
+    submitButton.innerText = "Submitting...";
+  }
+
+  try {
+    await submitRequestOnce();
+  } catch (err) {
+    console.error("Claim submission failed:", err);
+    alert("Unable to submit the claim. Please check your connection and try again.");
+  } finally {
+    isRequestSubmitting = false;
+    if (submitButton) {
+      submitButton.disabled = false;
+      submitButton.removeAttribute("aria-busy");
+      submitButton.innerText = submitButtonText;
+    }
+  }
+}
+
+async function submitRequestOnce() {
   const member = getSelectedRequestMember();
   const hospitalId = document.getElementById("requestHospital")?.value || "";
   const hospital = allHospitals.find(item => String(item.id) === String(hospitalId));
@@ -2272,6 +2326,10 @@ async function submitRequest() {
   }
 
   const action = requestId ? "editRequest" : "createRequest";
+  if (!requestId) {
+    requestSubmissionId = requestSubmissionId || generateID();
+    requestId = requestSubmissionId;
+  }
   const attachments = await readRequestAttachments();
 
   console.log("submitRequest action", action, "request_id", requestId, "editingRequestId", editingRequestId, "requestIdInput", requestIdInput?.value);
@@ -4736,6 +4794,33 @@ function resetKaramayClaimForm() {
 }
 
 async function submitKaramayClaim() {
+  if (isKaramayClaimSubmitting) return;
+
+  isKaramayClaimSubmitting = true;
+  const submitButton = document.getElementById("karamaySubmitButton");
+  const submitButtonText = submitButton?.textContent || "Forward to Branch Manager";
+  if (submitButton) {
+    submitButton.disabled = true;
+    submitButton.setAttribute("aria-busy", "true");
+    submitButton.textContent = "Submitting...";
+  }
+
+  try {
+    await submitKaramayClaimOnce();
+  } catch (err) {
+    console.error("Karamay claim submission failed:", err);
+    alert("Unable to submit the Karamay claim. Please check your connection and try again.");
+  } finally {
+    isKaramayClaimSubmitting = false;
+    if (submitButton) {
+      submitButton.disabled = false;
+      submitButton.removeAttribute("aria-busy");
+      submitButton.textContent = submitButtonText;
+    }
+  }
+}
+
+async function submitKaramayClaimOnce() {
   const deathCertificate = await readRequestAttachments("karamayDeathCertificate");
   const validId = await readRequestAttachments("karamayValidId");
   const attachments = [

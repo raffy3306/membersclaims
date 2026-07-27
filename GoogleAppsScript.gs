@@ -770,6 +770,11 @@ function createKaramayClaim(data) {
       const branchId = firstPresent(data.memberBranchId, data.branchid, data.tellerBranchId);
       const attachments = Array.isArray(data.attachments) ? data.attachments : [];
       const modeOfRelease = firstPresent(data.modeOfRelease, data.mode_of_release, data.ModeOfRelease, "Actual Delivery (Bouquet and Cash)");
+      const existingClaim = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, claimId);
+
+      if (existingClaim) {
+        return { success: true, request_id: claimId, claimID: claimId, duplicate: true };
+      }
 
       if (!data.memberName || !branchId || !data.memberAddress || !data.dateOfDeath) {
         return { success: false, message: "Please complete the deceased member information." };
@@ -915,6 +920,11 @@ function createRequest(data) {
       const actor = firstPresent(data.tellerName, data.tellerEmail);
       const branch = firstPresent(data.branch, data.tellerBranchId, data.branchid);
       const branchName = firstPresent(data.branchName, getBranchMap()[normalizeValue(branch)], branch);
+      const existingClaim = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, claimId);
+
+      if (existingClaim) {
+        return { success: true, request_id: claimId, claimID: claimId, duplicate: true };
+      }
 
       if (!data.memberID || !data.memberName) {
         return { success: false, message: "Please select a member from the member list." };
