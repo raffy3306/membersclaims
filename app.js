@@ -5973,6 +5973,491 @@ function navigateToBranch(page) {
   if (memberDataView) memberDataView.style.display = (page === 'members') ? 'block' : 'none';
 }
 
+function toggleVerifierReportsMenu(forceOpen) {
+  const toggle = document.getElementById("reportsMenuButton");
+  const submenu = document.getElementById("reportsSubmenu");
+  if (!toggle || !submenu) return;
+
+  const shouldOpen = typeof forceOpen === "boolean"
+    ? forceOpen
+    : toggle.getAttribute("aria-expanded") !== "true";
+  toggle.setAttribute("aria-expanded", String(shouldOpen));
+  submenu.hidden = !shouldOpen;
+}
+
+function resetClaimsSummaryResults() {
+  const results = document.getElementById("claimsSummaryReportResults");
+  const status = document.getElementById("claimsSummaryReportStatus");
+  const printButton = document.getElementById("printClaimsReportButton");
+  const exportGroup = document.getElementById("claimsExportGroup");
+  if (results) results.innerHTML = "";
+  if (status) {
+    status.textContent = "";
+    status.classList.remove("error");
+  }
+  if (printButton) printButton.style.display = "none";
+  if (exportGroup) exportGroup.style.display = "none";
+  closeClaimsExportMenu();
+}
+
+function handleClaimsReportTypeChange() {
+  const reportType = document.getElementById("claimsReportType")?.value || "";
+  const releaseModeGroup = document.getElementById("karamayReleaseModeGroup");
+  const releaseMode = document.getElementById("karamayReportReleaseMode");
+  if (releaseModeGroup) {
+    releaseModeGroup.style.display = reportType === "karamay" ? "block" : "none";
+  }
+  if (reportType !== "karamay" && releaseMode) releaseMode.value = "both";
+  resetClaimsSummaryResults();
+}
+
+function openClaimsSummaryModal() {
+  if (getCurrentRole() !== "membership_specialist") return;
+
+  closeAllModals();
+  toggleVerifierReportsMenu(true);
+  document.querySelectorAll(".sidebar-main .sidebar-btn, .sidebar-more .sidebar-btn")
+    .forEach(button => button.classList.remove("active"));
+  document.getElementById("reportsMenuButton")?.classList.add("active");
+  document.getElementById("claimsSummaryMenuButton")?.classList.add("active");
+
+  const modal = document.getElementById("claimsSummaryModal");
+  if (!modal) return;
+  resetClaimsSummaryResults();
+  const reportType = document.getElementById("claimsReportType");
+  if (reportType) reportType.value = "";
+  handleClaimsReportTypeChange();
+  modal.style.display = "flex";
+  modal.style.pointerEvents = "auto";
+  modal.style.opacity = "1";
+  modal.classList.add("active");
+  modal.setAttribute("aria-hidden", "false");
+  reportType?.focus();
+}
+
+function closeClaimsSummaryModal() {
+  const modal = document.getElementById("claimsSummaryModal");
+  if (!modal) return;
+  modal.classList.remove("active");
+  modal.style.display = "none";
+  modal.style.pointerEvents = "none";
+  modal.style.opacity = "0";
+  modal.setAttribute("aria-hidden", "true");
+  closeClaimsExportMenu();
+}
+
+function formatReportDate(value) {
+  const date = parseDateString(value);
+  if (!date) return String(value || "-");
+  return date.toLocaleDateString("en-PH", {
+    year: "numeric",
+    month: "short",
+    day: "2-digit"
+  });
+}
+
+function findReportMember(request) {
+  if (!Array.isArray(request)) return null;
+  const memberId = normalizeValue(request[17]);
+  const memberName = normalizeValue(request[1]);
+  return memberDataRows.find(member =>
+    (memberId && normalizeValue(member.memberID) === memberId) ||
+    (!memberId && memberName && normalizeValue(member.fullName) === memberName)
+  ) || allMembers.find(member =>
+    (memberId && normalizeValue(member.memberID) === memberId) ||
+    (!memberId && memberName && normalizeValue(member.fullName) === memberName)
+  ) || null;
+}
+
+function renderHospitalizationClaimsSummary(requests) {
+  const approvedClaims = (Array.isArray(requests) ? requests.slice(1) : [])
+    .filter(row => Array.isArray(row) && String(row[7] || "").trim() === "Approved");
+  const grandTotal = approvedClaims.reduce(
+    (total, row) => total + (Number(row[5]) || 0),
+    0
+  );
+
+  const rows = approvedClaims.map((row, index) => {
+    const member = findReportMember(row);
+    const branch = getRequestBranchName(row) || member?.branchName || getBranchName(member?.branch) || member?.branch || "-";
+    const address = member?.address || member?.memberAddress || "-";
+    return `<tr>
+      <td>${index + 1}</td>
+      <td>${escapeHtml(branch)}</td>
+      <td>${escapeHtml(row[1] || "-")}</td>
+      <td>${escapeHtml(address)}</td>
+      <td>${escapeHtml(row[18] || member?.segmentation || "-")}</td>
+      <td>${escapeHtml(row[3] ?? 0)}</td>
+      <td class="report-amount">&#8369;${escapeHtml(formatNumber(row[5]))}</td>
+    </tr>`;
+  }).join("");
+
+  return `
+    <div class="report-print-header">
+      <h1>Hospitalization Claims Summary</h1>
+    </div>
+    <div class="report-preview-label">Report Preview</div>
+    <div class="report-summary-heading">
+      <h4>Hospitalization Claims</h4>
+      <span>Item count: ${approvedClaims.length} &middot; Total amount claimed: &#8369;${escapeHtml(formatNumber(grandTotal))}</span>
+    </div>
+    <div class="report-table-wrap">
+      <table class="report-table">
+        <thead><tr>
+          <th>NO.</th><th>BRANCH NAME</th><th>NAME OF CLAIMANT</th><th>ADDRESS</th>
+          <th>SEGMENTATION</th><th>DAYS COMPUTED</th><th>AMOUNT CLAIMED</th>
+        </tr></thead>
+        <tbody>${rows || '<tr><td colspan="7" style="text-align:center;">No approved hospitalization claims found.</td></tr>'}</tbody>
+        <tfoot>
+          <tr class="report-grand-total">
+            <td colspan="6" style="text-align:right;">TOTAL AMOUNT CLAIMED</td>
+            <td class="report-amount">&#8369;${escapeHtml(formatNumber(grandTotal))}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>`;
+}
+
+function getKaramayReportReleaseMode(value) {
+  const normalized = normalizeValue(value);
+  if (normalized.includes("actual delivery")) {
+    return { key: "actual_delivery", label: "Actual Delivery", amount: 3000 };
+  }
+  if (normalized.includes("cash equivalent")) {
+    return { key: "cash_equivalent", label: "Cash Equivalent", amount: 2000 };
+  }
+  return { key: "actual_delivery", label: "Actual Delivery", amount: 3000 };
+}
+
+function renderKaramayClaimsSummary(claims, selectedReleaseMode = "both") {
+  const claimRows = (Array.isArray(claims) ? claims.slice(1) : [])
+    .filter(row => Array.isArray(row) && String(row[10] || "").trim() === "Approved")
+    .map(row => ({ row, release: getKaramayReportReleaseMode(row[9]) }))
+    .filter(item => selectedReleaseMode === "both" || item.release.key === selectedReleaseMode);
+  const grandTotal = claimRows.reduce((total, item) => total + item.release.amount, 0);
+  const rows = claimRows.map((item, index) => {
+    const row = item.row;
+    return `<tr>
+      <td>${index + 1}</td>
+      <td>${escapeHtml(getBranchName(row[2]) || row[2] || "-")}</td>
+      <td>${escapeHtml(row[1] || "-")}</td>
+      <td>${escapeHtml(row[3] || "-")}</td>
+      <td>${escapeHtml(formatReportDate(row[4]))}</td>
+      <td>${escapeHtml(row[5] || "-")}</td>
+      <td>${escapeHtml(row[6] || "-")}</td>
+      <td>${escapeHtml(item.release.label)}</td>
+      <td class="report-amount">&#8369;${escapeHtml(formatNumber(item.release.amount))}</td>
+    </tr>`;
+  }).join("");
+  const selectedLabel = selectedReleaseMode === "actual_delivery"
+    ? "Actual Delivery"
+    : selectedReleaseMode === "cash_equivalent"
+      ? "Cash Equivalent"
+      : "Both";
+
+  return `
+    <div class="report-print-header">
+      <h1>Karamay Claims Summary</h1>
+      <p>Approved claims only &middot; Mode of Release: ${escapeHtml(selectedLabel)}</p>
+    </div>
+    <div class="report-preview-label">Report Preview</div>
+    <div class="report-summary-heading">
+      <h4>Karamay Claims</h4>
+      <span>Item count: ${claimRows.length} &middot; Grand total: &#8369;${escapeHtml(formatNumber(grandTotal))}</span>
+    </div>
+    <div class="report-table-wrap">
+      <table class="report-table">
+        <thead><tr>
+          <th>NO.</th><th>BRANCH NAME</th><th>MEMBER NAME</th><th>ADDRESS</th><th>DATE OF DEATH</th>
+          <th>NAME OF BENEFICIARY</th><th>RELATIONSHIP</th><th>MODE OF RELEASE</th><th>AMOUNT</th>
+        </tr></thead>
+        <tbody>${rows || '<tr><td colspan="9" style="text-align:center;">No approved Karamay claims found for the selected mode of release.</td></tr>'}</tbody>
+        <tfoot>
+          <tr class="report-grand-total">
+            <td colspan="8" style="text-align:right;">GRAND TOTAL</td>
+            <td class="report-amount">&#8369;${escapeHtml(formatNumber(grandTotal))}</td>
+          </tr>
+        </tfoot>
+      </table>
+    </div>`;
+}
+
+function closeClaimsExportMenu() {
+  const menu = document.getElementById("claimsExportMenu");
+  const toggle = document.querySelector("#claimsExportGroup > button");
+  if (menu) menu.hidden = true;
+  if (toggle) toggle.setAttribute("aria-expanded", "false");
+}
+
+function toggleClaimsExportMenu(event) {
+  event?.stopPropagation();
+  const menu = document.getElementById("claimsExportMenu");
+  const toggle = document.querySelector("#claimsExportGroup > button");
+  if (!menu) return;
+  const shouldOpen = menu.hidden;
+  menu.hidden = !shouldOpen;
+  if (toggle) toggle.setAttribute("aria-expanded", String(shouldOpen));
+}
+
+function getClaimsReportExportBaseName() {
+  const reportType = document.getElementById("claimsReportType")?.value || "claims";
+  const date = new Date().toISOString().slice(0, 10);
+  return `${reportType === "karamay" ? "karamay-claims" : "hospitalization-claims"}-${date}`;
+}
+
+function getClaimsReportTable() {
+  return document.querySelector("#claimsSummaryReportResults .report-table");
+}
+
+function downloadClaimsReportBlob(blob, fileName) {
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = url;
+  link.download = fileName;
+  document.body.appendChild(link);
+  link.click();
+  link.remove();
+  window.setTimeout(() => URL.revokeObjectURL(url), 1000);
+}
+
+function exportClaimsSummaryToCsv() {
+  const table = getClaimsReportTable();
+  if (!table) throw new Error("Generate a report before exporting.");
+
+  const csv = Array.from(table.rows).map(row =>
+    Array.from(row.cells).map(cell => {
+      let value = String(cell.innerText || "").replace(/\r?\n/g, " ").trim();
+      if (/^[=+\-@]/.test(value)) value = `'${value}`;
+      return `"${value.replace(/"/g, '""')}"`;
+    }).join(",")
+  ).join("\r\n");
+
+  downloadClaimsReportBlob(
+    new Blob(["\uFEFF", csv], { type: "text/csv;charset=utf-8" }),
+    `${getClaimsReportExportBaseName()}.csv`
+  );
+}
+
+function exportClaimsSummaryToExcel() {
+  const table = getClaimsReportTable();
+  if (!table) throw new Error("Generate a report before exporting.");
+
+  const title = document.querySelector("#claimsSummaryReportResults .report-print-header h1")?.textContent
+    || "Claims Summary";
+  const workbook = `<!DOCTYPE html>
+    <html xmlns:o="urn:schemas-microsoft-com:office:office"
+      xmlns:x="urn:schemas-microsoft-com:office:excel"
+      xmlns="http://www.w3.org/TR/REC-html40">
+      <head>
+        <meta charset="UTF-8">
+        <meta name="ProgId" content="Excel.Sheet">
+        <style>
+          table { border-collapse: collapse; }
+          th, td { border: 1px solid #777; padding: 6px; }
+          th { background: #e5e7eb; font-weight: bold; }
+          .report-amount { text-align: right; }
+          .report-grand-total { font-weight: bold; }
+        </style>
+      </head>
+      <body>
+        <h2>${escapeHtml(title)}</h2>
+        ${table.outerHTML}
+      </body>
+    </html>`;
+
+  downloadClaimsReportBlob(
+    new Blob(["\uFEFF", workbook], { type: "application/vnd.ms-excel;charset=utf-8" }),
+    `${getClaimsReportExportBaseName()}.xls`
+  );
+}
+
+function exportClaimsSummaryReport(fileType) {
+  closeClaimsExportMenu();
+  const status = document.getElementById("claimsSummaryReportStatus");
+  if (status) status.classList.remove("error");
+  try {
+    if (fileType === "csv") {
+      exportClaimsSummaryToCsv();
+    } else if (fileType === "excel") {
+      exportClaimsSummaryToExcel();
+    } else if (fileType === "pdf") {
+      if (status) status.textContent = "In the print dialog, select Save as PDF to export the report.";
+      printClaimsSummaryReport(true);
+    }
+  } catch (err) {
+    if (status) {
+      status.textContent = err?.message || "Unable to export the report.";
+      status.classList.add("error");
+    }
+  }
+}
+
+document.addEventListener("click", event => {
+  if (!event.target.closest("#claimsExportGroup")) closeClaimsExportMenu();
+});
+
+function printClaimsSummaryReport(exportAsPdf = false) {
+  const results = document.getElementById("claimsSummaryReportResults");
+  if (!results || !results.innerHTML.trim()) {
+    alert("Generate a report before printing.");
+    return;
+  }
+
+  const printWindow = window.open("", "_blank", "width=1200,height=800");
+  if (!printWindow) {
+    alert("The print preview was blocked. Please allow pop-ups and try again.");
+    return;
+  }
+
+  const generatedDate = new Date().toLocaleString("en-PH", {
+    year: "numeric",
+    month: "long",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit"
+  });
+
+  printWindow.document.open();
+  printWindow.document.write(`<!DOCTYPE html>
+    <html>
+      <head>
+        <meta charset="UTF-8">
+        <title>${exportAsPdf ? "Export Claims Summary as PDF" : "Claims Summary Report"}</title>
+        <style>
+          @page {
+            size: 13in 8.5in;
+            margin: 0.5in;
+          }
+          * { box-sizing: border-box; }
+          body {
+            margin: 0;
+            color: #111827;
+            font-family: Arial, Helvetica, sans-serif;
+            font-size: 11px;
+          }
+          .report-print-header {
+            display: block;
+            margin-bottom: 18px;
+            text-align: center;
+          }
+          .report-print-header h1 {
+            margin: 0 0 5px;
+            font-size: 20px;
+          }
+          .report-print-header p {
+            margin: 0;
+            color: #4b5563;
+          }
+          .report-preview-label { display: none; }
+          .report-summary-heading {
+            display: flex;
+            justify-content: space-between;
+            align-items: baseline;
+            margin-bottom: 10px;
+          }
+          .report-summary-heading h4 { margin: 0; font-size: 14px; }
+          .report-summary-heading span { color: #4b5563; }
+          .report-table-wrap { overflow: visible; }
+          table {
+            width: 100%;
+            border-collapse: collapse;
+            table-layout: auto;
+          }
+          th, td {
+            padding: 7px 8px;
+            border: 1px solid #9ca3af;
+            text-align: left;
+            vertical-align: top;
+            overflow-wrap: anywhere;
+          }
+          th {
+            background: #e5e7eb;
+            font-size: 10px;
+          }
+          .report-amount {
+            text-align: right;
+            white-space: nowrap;
+          }
+          .report-grand-total {
+            font-weight: 700;
+          }
+          .report-grand-total td {
+            background: #e5e7eb;
+            border-top: 2px solid #4b5563;
+          }
+          .print-generated {
+            margin-top: 10px;
+            color: #6b7280;
+            font-size: 9px;
+            text-align: right;
+          }
+          @media print {
+            body { print-color-adjust: exact; -webkit-print-color-adjust: exact; }
+          }
+        </style>
+      </head>
+      <body>
+        ${results.innerHTML}
+        <div class="print-generated">Generated: ${escapeHtml(generatedDate)}</div>
+      </body>
+    </html>`);
+  printWindow.document.close();
+  printWindow.focus();
+  printWindow.setTimeout(() => printWindow.print(), 250);
+}
+
+async function generateClaimsSummaryReport() {
+  const reportType = document.getElementById("claimsReportType")?.value || "";
+  const status = document.getElementById("claimsSummaryReportStatus");
+  const results = document.getElementById("claimsSummaryReportResults");
+  const button = document.getElementById("generateClaimsReportButton");
+  const printButton = document.getElementById("printClaimsReportButton");
+  const exportGroup = document.getElementById("claimsExportGroup");
+  if (!reportType) {
+    if (status) {
+      status.textContent = "Please select a report type.";
+      status.classList.add("error");
+    }
+    return;
+  }
+
+  if (status) {
+    status.textContent = "Loading report data...";
+    status.classList.remove("error");
+  }
+  if (results) results.innerHTML = "";
+  if (button) button.disabled = true;
+  if (printButton) printButton.style.display = "none";
+  if (exportGroup) exportGroup.style.display = "none";
+
+  try {
+    if (reportType === "hospitalization") {
+      const [requests] = await Promise.all([
+        loadWorkflowRequests(true),
+        memberDataRows.length && allBranches.length ? Promise.resolve() : loadMemberData(true)
+      ]);
+      if (results) results.innerHTML = renderHospitalizationClaimsSummary(requests);
+    } else {
+      const [claims] = await Promise.all([
+        loadKaramayClaims(true),
+        allBranches.length ? Promise.resolve() : loadMemberData(true)
+      ]);
+      const releaseMode = document.getElementById("karamayReportReleaseMode")?.value || "both";
+      if (results) results.innerHTML = renderKaramayClaimsSummary(claims, releaseMode);
+    }
+    if (status) status.textContent = "Report generated successfully. Review, print, or export the report below.";
+    if (printButton) printButton.style.display = "inline-flex";
+    if (exportGroup) exportGroup.style.display = "inline-block";
+  } catch (err) {
+    if (status) {
+      status.textContent = err?.message || "Unable to generate the report.";
+      status.classList.add("error");
+    }
+  } finally {
+    if (button) button.disabled = false;
+  }
+}
+
 function navigateToFinance(page) {
   const financeSidebarButtons = document.querySelectorAll(
     '.sidebar-main .sidebar-btn, .sidebar-admin .sidebar-btn, .sidebar-bottom .sidebar-btn'

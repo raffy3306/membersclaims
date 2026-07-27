@@ -43,6 +43,19 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
       <button id="memberDataMenuButton" class="sidebar-btn" onclick="navigateToBranch('members')">
         <span class="icon">&#128100;</span> Member Data Entry
       </button>
+      <div id="reportsMenu" class="sidebar-menu-group">
+        <button id="reportsMenuButton" class="sidebar-btn sidebar-menu-toggle" type="button"
+          onclick="toggleVerifierReportsMenu()" aria-expanded="false" aria-controls="reportsSubmenu">
+          <span class="icon">&#128202;</span> Reports
+          <span class="sidebar-chevron" aria-hidden="true">&#9662;</span>
+        </button>
+        <div id="reportsSubmenu" class="sidebar-submenu" hidden>
+          <button id="claimsSummaryMenuButton" class="sidebar-btn sidebar-submenu-btn" type="button"
+            onclick="openClaimsSummaryModal()">
+            Claims Summary
+          </button>
+        </div>
+      </div>
     </div>
 
     <div class="sidebar-more">
@@ -264,6 +277,63 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
   </div>
 </div>
 
+<!-- CLAIMS SUMMARY REPORT MODAL -->
+<div class="modal" id="claimsSummaryModal" role="dialog" aria-modal="true"
+  aria-labelledby="claimsSummaryModalTitle" aria-hidden="true">
+  <div class="modal-content modal-xl report-modal-content">
+    <div class="modal-header">
+      <div>
+        <h3 id="claimsSummaryModalTitle">Claims Summary</h3>
+        <p class="report-modal-subtitle">Select a report type to view the claims summary.</p>
+      </div>
+      <button class="modal-close" type="button" onclick="closeClaimsSummaryModal()" aria-label="Close">&times;</button>
+    </div>
+    <div class="modal-body">
+      <div class="report-form">
+        <div class="form-group">
+          <label for="claimsReportType">Report Type</label>
+          <select id="claimsReportType" class="form-control" onchange="handleClaimsReportTypeChange()">
+            <option value="">Select report type</option>
+            <option value="hospitalization">Hospitalization Claims</option>
+            <option value="karamay">Karamay Claims</option>
+          </select>
+        </div>
+        <div id="karamayReleaseModeGroup" class="form-group" style="display: none;">
+          <label for="karamayReportReleaseMode">Mode of Release</label>
+          <select id="karamayReportReleaseMode" class="form-control" onchange="resetClaimsSummaryResults()">
+            <option value="both">Both</option>
+            <option value="actual_delivery">Actual Delivery</option>
+            <option value="cash_equivalent">Cash Equivalent</option>
+          </select>
+        </div>
+        <button id="generateClaimsReportButton" class="btn blue" type="button" onclick="generateClaimsSummaryReport()">
+          Generate Report
+        </button>
+      </div>
+      <div id="claimsSummaryReportStatus" class="report-status" aria-live="polite"></div>
+      <div id="claimsSummaryReportResults" class="report-results"></div>
+    </div>
+    <div class="modal-footer">
+      <button class="btn" type="button" onclick="closeClaimsSummaryModal()">Close</button>
+      <button id="printClaimsReportButton" class="btn blue" type="button"
+        onclick="printClaimsSummaryReport()" style="display: none;">
+        Print Report
+      </button>
+      <div id="claimsExportGroup" class="report-export-group" style="display: none;">
+        <button class="btn blue" type="button" onclick="toggleClaimsExportMenu(event)"
+          aria-haspopup="true" aria-expanded="false">
+          Export
+        </button>
+        <div id="claimsExportMenu" class="report-export-menu" hidden>
+          <button type="button" onclick="exportClaimsSummaryReport('excel')">Excel</button>
+          <button type="button" onclick="exportClaimsSummaryReport('csv')">CSV</button>
+          <button type="button" onclick="exportClaimsSummaryReport('pdf')">PDF</button>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
 <!-- MEMBER MODAL -->
 <div class="modal" id="memberModal">
   <div class="modal-content modal-lg">
@@ -310,6 +380,8 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
   if (!["membership_specialist", "membershipspecialist", "mrdspecialist", "verifier", "processor"].includes(role)) {
     const memberDataButton = document.getElementById("memberDataMenuButton");
     if (memberDataButton) memberDataButton.style.display = "none";
+    const reportsMenu = document.getElementById("reportsMenu");
+    if (reportsMenu) reportsMenu.style.display = "none";
   }
 })();
 </script>
