@@ -192,6 +192,7 @@ create table if not exists public.karamayclaims (
   relationship text not null,
   beneficiary_address text not null,
   contact_number text not null,
+  mode_of_release text not null default 'Actual Delivery (Bouquet and Cash)',
   claim_status text not null default 'Pending',
   status text not null default 'Pending',
   encoded_by text default '',
@@ -213,6 +214,7 @@ alter table public.karamayclaims add column if not exists beneficiary_name text;
 alter table public.karamayclaims add column if not exists relationship text;
 alter table public.karamayclaims add column if not exists beneficiary_address text;
 alter table public.karamayclaims add column if not exists contact_number text;
+alter table public.karamayclaims add column if not exists mode_of_release text default 'Actual Delivery (Bouquet and Cash)';
 alter table public.karamayclaims add column if not exists claim_status text default 'Pending';
 alter table public.karamayclaims add column if not exists status text default 'Pending';
 alter table public.karamayclaims add column if not exists encoded_by text default '';
