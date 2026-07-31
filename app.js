@@ -3453,6 +3453,65 @@ function renderFinanceTable(searchText = "", statusFilter = "All Statuses") {
   }
 }
 
+function renderHospitalizationClaimsView(searchText = "", statusFilter = "All Statuses") {
+  let html = "";
+  let filteredCount = 0;
+
+  if (!Array.isArray(allRequests)) {
+    const table = document.getElementById("hospitalizationTable");
+    if (table) table.innerHTML = '<tr><td colspan="9">No hospitalization claims found.</td></tr>';
+    const counter = document.getElementById("hospitalizationCount");
+    if (counter) counter.innerText = "0 hospitalization claims";
+    return;
+  }
+
+  for (let i = 1; i < allRequests.length; i++) {
+    const r = allRequests[i];
+    if (!Array.isArray(r) || !r.length) continue;
+
+    const claimId = String(r[0] || "");
+    if (claimId.startsWith("KRM")) continue;
+
+    const rowText = `${r[0]} ${r[1]} ${r[6]} ${r[8]} ${r[7]}`.toLowerCase();
+    if (searchText && !rowText.includes(searchText.toLowerCase())) continue;
+    if (statusFilter !== "All Statuses" && statusFilter !== r[7]) continue;
+
+    filteredCount++;
+    const dateStr = r[11] ? new Date(r[11]).toLocaleString() : "N/A";
+
+    html += `
+      <tr>
+        <td>${r[0]}</td>
+        <td>${r[1]}</td>
+        <td>${formatDays(r[3])}</td>
+        <td>${formatMoney(r[4])}</td>
+        <td>${formatMoney(r[5])}</td>
+        <td>${r[6]}</td>
+        <td>${r[7]}</td>
+        <td>${dateStr}</td>
+        <td>
+          <button class="btn blue" onclick="openModal('${r[0]}')">View</button>
+        </td>
+      </tr>
+    `;
+  }
+
+  const table = document.getElementById("hospitalizationTable");
+  if (table) {
+    table.innerHTML = html || '<tr><td colspan="9">No hospitalization claims found.</td></tr>';
+  }
+
+  const counter = document.getElementById("hospitalizationCount");
+  if (counter) {
+    counter.innerText = `${filteredCount} hospitalization claim${filteredCount === 1 ? "" : "s"}`;
+  }
+}
+
+async function loadHospitalizationClaimsView(forceRefresh = false) {
+  await loadWorkflowRequests(forceRefresh);
+  renderHospitalizationClaimsView();
+}
+
 function updateFinanceSummary() {
   if (!Array.isArray(allRequests)) return;
   let forwardedCount = 0;
@@ -3552,6 +3611,10 @@ function navigateToFinance(page) {
       headerTitle.innerText = '💜 Audit Logs';
       subtitle.innerText = 'Audit history and request activity for review.';
       if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="location.reload()">Refresh</button>';
+    } else if (page === 'hospitalization') {
+      headerTitle.innerText = '🏥 Hospitalization Claims';
+      subtitle.innerText = 'Review hospitalization claims submitted through the claims workflow.';
+      if (headerActions) headerActions.innerHTML = '<button class="btn blue" onclick="loadHospitalizationClaimsView(true)">Refresh</button>';
     } else if (page === 'karamay') {
       headerTitle.innerText = '🧾 Karamay Claims';
       subtitle.innerText = 'Review Karamay claims submitted by CRS';
@@ -3582,6 +3645,8 @@ function navigateToFinance(page) {
     loadFinanceDashboard();
   } else if (page === 'audit') {
     loadAuditLogs();
+  } else if (page === 'hospitalization') {
+    loadHospitalizationClaimsView();
   } else if (page === 'karamay') {
     loadKaramayClaims();
   }
@@ -6481,6 +6546,9 @@ function navigateToFinance(page) {
     } else if (page === 'audit') {
       headerTitle.innerText = 'Audit Logs';
       subtitle.innerText = 'Claim activity and workflow history';
+    } else if (page === 'hospitalization') {
+      headerTitle.innerText = '🏥 Hospitalization Claims';
+      subtitle.innerText = 'Review hospitalization claims submitted through the claims workflow.';
     } else if (page === 'karamay') {
       headerTitle.innerText = '🧾 Karamay Claims';
       subtitle.innerText = 'Review Karamay claims submitted by CRS';
@@ -6495,16 +6563,19 @@ function navigateToFinance(page) {
   const approvalQueue = document.getElementById('approvalQueueView');
   const dashboard = document.getElementById('dashboardView');
   const audit = document.getElementById('auditView');
+  const hospitalizationView = document.getElementById('hospitalizationView');
   const karamayView = document.getElementById('karamayView');
 
   if (approvalQueue) approvalQueue.style.display = (page === 'approval') ? 'block' : 'none';
   if (dashboard) dashboard.style.display = (page === 'dashboard') ? 'block' : 'none';
   if (audit) audit.style.display = (page === 'audit') ? 'block' : 'none';
+  if (hospitalizationView) hospitalizationView.style.display = (page === 'hospitalization') ? 'block' : 'none';
   if (karamayView) karamayView.style.display = (page === 'karamay') ? 'block' : 'none';
 
   if (page === 'approval') loadFinanceTable();
   else if (page === 'dashboard') loadFinanceDashboard();
   else if (page === 'audit') loadAuditLogs();
+  else if (page === 'hospitalization') loadHospitalizationClaimsView();
   else if (page === 'karamay') loadKaramayClaims();
 }
 
