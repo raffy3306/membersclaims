@@ -44,6 +44,9 @@ if (approverRole !== "savings_credit_head") {
       <button class="sidebar-btn" onclick="navigateToFinance('audit')">
         <span class="icon">&#128203;</span> Audit Logs
       </button>
+      <button class="sidebar-btn" onclick="navigateToFinance('hospitalization')">
+        <span class="icon">🏥</span> Hospitalization Claims
+      </button>
       <button class="sidebar-btn" onclick="navigateToFinance('karamay')">
         <span class="icon">🧾</span> Karamay Claims
       </button>
@@ -176,6 +179,36 @@ if (approverRole !== "savings_credit_head") {
       </div>
     </div>
 
+    <div id="hospitalizationView" style="display: none;">
+      <div class="table-container">
+        <div class="table-header">
+          <div>
+            <h3>Hospitalization Claims</h3>
+            <p class="table-count" id="hospitalizationCount">0 hospitalization claims</p>
+          </div>
+          <div class="table-controls">
+            <button class="btn blue" onclick="loadHospitalizationClaimsView(true)">Refresh</button>
+          </div>
+        </div>
+        <table>
+          <thead>
+            <tr>
+              <th>CLAIM NO.</th>
+              <th>MEMBER NAME</th>
+              <th>DAYS COMPUTED</th>
+              <th>RATE / DAY</th>
+              <th>CLAIMABLE AMOUNT</th>
+              <th>HOSPITAL</th>
+              <th>STATUS</th>
+              <th>DATE FILED</th>
+              <th>ACTIONS</th>
+            </tr>
+          </thead>
+          <tbody id="hospitalizationTable"></tbody>
+        </table>
+      </div>
+    </div>
+
     <div id="karamayView" style="display: none;">
       <div class="table-container">
         <div class="table-header">
@@ -192,11 +225,11 @@ if (approverRole !== "savings_credit_head") {
             <tr>
               <th>CLAIM NO.</th>
               <th>MEMBER NAME</th>
-              <th>BRANCH ID</th>
-              <th>MODE OF RELEASE</th>
               <th>BENEFICIARY</th>
+              <th>RELATIONSHIP</th>
+              <th>DATE OF DEATH</th>
               <th>STATUS</th>
-              <th>DATE</th>
+              <th>DATE FILED</th>
               <th>ACTIONS</th>
             </tr>
           </thead>
