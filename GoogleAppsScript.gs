@@ -60,7 +60,8 @@ const KARAMAY_CLAIM_HEADERS = [
   "BranchManagerReviewedBy",
   "SavingsCreditApprovedBy",
   "Notes",
-  "Attachments"
+  "Attachments",
+  "MembershipSpecialistVerifiedBy"
 ];
 
 const KARAMAY_ATTACHMENT_DATA_HEADERS = [
@@ -805,6 +806,7 @@ function createKaramayClaim(data) {
         EncodedBy: actor,
         DateStamp: new Date(),
         BranchManagerReviewedBy: "",
+        MembershipSpecialistVerifiedBy: "",
         SavingsCreditApprovedBy: "",
         Notes: "",
         Attachments: JSON.stringify(stagedAttachments.attachments)
@@ -893,6 +895,7 @@ function editKaramayClaim(data) {
         Status: "Pending",
         EncodedBy: actor,
         BranchManagerReviewedBy: "",
+        MembershipSpecialistVerifiedBy: "",
         SavingsCreditApprovedBy: "",
         Notes: "",
         Attachments: JSON.stringify(stagedAttachments.attachments)
@@ -1089,8 +1092,27 @@ function updateStatus(data) {
       };
 
       if (isKaramayClaim) {
-        if (role === "branch_manager" || role === "membership_specialist") {
-          updates.BranchManagerReviewedBy = firstPresent(data.branchManagerName, data.branchManagerEmail, data.financeManagerName, data.financeManagerEmail);
+        const currentStatus = String(getCell(meta, found.row, ["Status", "ClaimStatus"], 10, "")).trim();
+        const allowedTransitions = {
+          branch_manager: { Pending: ["Under Verification", "Returned"] },
+          membership_specialist: { "Under Verification": ["Forwarded", "Pending"] },
+          savings_credit_head: { Forwarded: ["Approved", "Rejected"] }
+        };
+        const allowedStatuses = allowedTransitions[role] && allowedTransitions[role][currentStatus]
+          ? allowedTransitions[role][currentStatus]
+          : [];
+        if (allowedStatuses.indexOf(data.status) === -1) {
+          return { success: false, message: "This Karamay claim cannot move from " + (currentStatus || "its current status") + " to " + (data.status || "the requested status") + " for your role." };
+        }
+
+        if (role === "branch_manager") {
+          updates.BranchManagerReviewedBy = firstPresent(data.branchManagerName, data.branchManagerEmail);
+        }
+
+        if (role === "membership_specialist") {
+          updates.MembershipSpecialistVerifiedBy = data.status === "Forwarded"
+            ? firstPresent(data.financeManagerName, data.financeManagerEmail)
+            : "";
         }
 
         if (role === "savings_credit_head" && (data.status === "Approved" || data.status === "Rejected")) {

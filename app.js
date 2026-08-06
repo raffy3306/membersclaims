@@ -1,4 +1,4 @@
-const API = "https://script.google.com/macros/s/AKfycbxxNRfNxtnj39C-nCT7XddGijbZcmA-Ip0JRS0X6C7jaXRJBz5MdGgwelk2CJ4RW7vdeg/exec";
+const API = "https://script.google.com/macros/s/AKfycbxMBjk5Mm_R_BIdBgrw2WnLQsYTTy3B6CBISQomfwAdlh5J56wof7tvf8GpPcsPauaH/exec";
 // Apps Script web apps reject CORS preflight OPTIONS requests, so POST JSON as plain text.
 const APPS_SCRIPT_JSON_HEADERS = { "Content-Type": "text/plain;charset=utf-8" };
 
@@ -54,7 +54,7 @@ const ROLE_ALIASES = {
 
 const STATUS_LABELS = {
   Pending: "For Branch Manager Review",
-  "Under Verification": "For Membership Specialist Review",
+  "Under Verification": "For MRDS Review",
   "Under Review": "For Finance Review",
   Forwarded: "For Approval",
   Returned: "Returned",
@@ -111,7 +111,8 @@ const KARAMAY_CLAIM_HEADERS = [
   "BranchManagerReviewedBy",
   "SavingsCreditApprovedBy",
   "Notes",
-  "Attachments"
+  "Attachments",
+  "MembershipSpecialistVerifiedBy"
 ];
 
 function getSupabaseConfig() {
@@ -629,7 +630,8 @@ function karamayClaimToLegacyRow(claim) {
     pickField(claim, ["branch_manager_reviewed_by"], ""),
     pickField(claim, ["savings_credit_approved_by", "approved_by"], ""),
     pickField(claim, ["remarks", "notes"], ""),
-    normalizeAttachments(pickField(claim, ["attachments"], []))
+    normalizeAttachments(pickField(claim, ["attachments"], [])),
+    pickField(claim, ["membership_specialist_verified_by", "verified_by"], "")
   ];
 }
 
@@ -667,6 +669,7 @@ async function supabaseCreateKaramayClaim(data) {
     status: "Pending",
     encoded_by: data.tellerName || data.tellerEmail || "",
     branch_manager_reviewed_by: "",
+    membership_specialist_verified_by: "",
     savings_credit_approved_by: "",
     remarks: "",
     attachments: data.attachments || [],
@@ -741,6 +744,7 @@ async function supabaseEditKaramayClaim(data) {
     claim_status: "Pending",
     status: "Pending",
     branch_manager_reviewed_by: "",
+    membership_specialist_verified_by: "",
     savings_credit_approved_by: "",
     remarks: "",
     attachments: Array.isArray(data.attachments) ? data.attachments : [],
@@ -947,6 +951,27 @@ async function supabaseUpdateStatus(data) {
   const isKaramayClaim = String(data.request_id || "").startsWith("KRM");
   const tableName = isKaramayClaim ? SUPABASE_TABLES.karamayClaims : SUPABASE_TABLES.claims;
 
+  if (isKaramayClaim) {
+    const { data: existing, error: findError } = await db
+      .from(tableName)
+      .select("claim_status,status")
+      .eq("claim_id", data.request_id)
+      .maybeSingle();
+    if (findError) throw findError;
+    if (!existing) return { success: false, message: "Karamay claim not found." };
+
+    const currentStatus = String(existing.claim_status || existing.status || "").trim();
+    const allowedTransitions = {
+      branch_manager: { Pending: ["Under Verification", "Returned"] },
+      membership_specialist: { "Under Verification": ["Forwarded", "Pending"] },
+      savings_credit_head: { Forwarded: ["Approved", "Rejected"] }
+    };
+    const allowedStatuses = allowedTransitions[role]?.[currentStatus] || [];
+    if (!allowedStatuses.includes(data.status)) {
+      return { success: false, message: `This Karamay claim cannot move from ${currentStatus || "its current status"} to ${data.status || "the requested status"} for your role.` };
+    }
+  }
+
   const updates = {
     claim_status: data.status,
     status: data.status,
@@ -955,8 +980,14 @@ async function supabaseUpdateStatus(data) {
   };
 
   if (isKaramayClaim) {
-    if (role === "branch_manager" || role === "membership_specialist") {
-      updates.branch_manager_reviewed_by = data.branchManagerName || data.branchManagerEmail || data.financeManagerName || data.financeManagerEmail || "";
+    if (role === "branch_manager") {
+      updates.branch_manager_reviewed_by = data.branchManagerName || data.branchManagerEmail || "";
+    }
+
+    if (role === "membership_specialist") {
+      updates.membership_specialist_verified_by = data.status === "Forwarded"
+        ? data.financeManagerName || data.financeManagerEmail || ""
+        : "";
     }
 
     if (role === "savings_credit_head") {
@@ -4746,6 +4777,7 @@ function getInputTrim(id) {
 function getKaramayStatusLabel(status) {
   const labels = {
     Pending: "For Branch Manager Review",
+    "Under Verification": "For Membership Care Specialist Verification",
     Forwarded: "For Savings and Credit Head Approval",
     Approved: "Approved",
     Returned: "Returned",
@@ -4948,7 +4980,8 @@ async function submitKaramayClaimOnce() {
     "",
     "",
     "",
-    attachmentsToSend
+    attachmentsToSend,
+    ""
   ];
 
   async function verifyKaramayUpdate(attempts = 4, intervalMs = 1200) {
@@ -5049,6 +5082,7 @@ async function submitKaramayClaimOnce() {
 
 async function loadKaramayClaims(forceRefresh = false) {
   if (!forceRefresh && Array.isArray(allKaramayClaims) && allKaramayClaims.length > 1) {
+    await ensureKaramayBranchReferences();
     renderKaramayClaims();
     return allKaramayClaims;
   }
@@ -5056,6 +5090,8 @@ async function loadKaramayClaims(forceRefresh = false) {
   if (!karamayClaimsPromise || forceRefresh) {
     karamayClaimsPromise = (async () => {
       let data = [KARAMAY_CLAIM_HEADERS];
+
+      await ensureKaramayBranchReferences();
 
       try {
         const res = await fetch(API, {
@@ -5089,10 +5125,34 @@ async function loadKaramayClaims(forceRefresh = false) {
   return karamayClaimsPromise;
 }
 
+async function ensureKaramayBranchReferences() {
+  if (Array.isArray(allBranches) && allBranches.length) return;
+
+  try {
+    const response = await fetch(API, {
+      method: "POST",
+      headers: APPS_SCRIPT_JSON_HEADERS,
+      body: JSON.stringify({ action: "getBranches" })
+    });
+    const result = await parseApiJsonResponse(response);
+    if (!result?.success || !Array.isArray(result.branches)) return;
+
+    allBranches = result.branches
+      .filter(branch => branch && (branch.branchID || branch.branchName))
+      .map(branch => ({
+        branchID: String(branch.branchID || branch.branchName || "").trim(),
+        branchName: String(branch.branchName || branch.branchID || "").trim()
+      }));
+  } catch (err) {
+    console.warn("Unable to load branch references for Karamay claims:", err);
+  }
+}
+
 function renderKaramayClaims() {
   const role = getCurrentRole();
   const normalizedRole = normalizeRole(role);
   const branchId = String(localStorage.getItem('branchid') || '').trim();
+  const isBranchVerifierDashboard = Boolean(document.getElementById('reviewView'));
 
   const normalizedBranchId = normalizeValue(branchId);
   const searchText = normalizeValue(document.getElementById('adminKaramaySearch')?.value || '');
@@ -5104,9 +5164,11 @@ function renderKaramayClaims() {
       if (normalizedRole === 'crs') {
         return userMatchesEncodedBy(row[11]);
       }
-      if (normalizedRole === 'branch_manager' || normalizedRole === 'membership_specialist') {
-        const claimBranchId = normalizeValue(row[2]);
-        return claimBranchId === normalizedBranchId || claimBranchId === normalizeValue(getBranchName(branchId));
+      if (normalizedRole === 'branch_manager') {
+        return karamayClaimBelongsToBranch(row, branchId);
+      }
+      if (normalizedRole === 'membership_specialist') {
+        return !normalizedBranchId || karamayClaimBelongsToBranch(row, branchId);
       }
       if (normalizedRole === 'savings_credit_head' || normalizedRole === 'finance_head' || normalizedRole === 'admin') {
         return true;
@@ -5115,6 +5177,10 @@ function renderKaramayClaims() {
     })
     .filter(row => {
       const status = String(row[10] || '').trim();
+      if (isBranchVerifierDashboard) {
+        if (normalizedRole === 'membership_specialist' && status !== 'Under Verification') return false;
+        if (normalizedRole === 'branch_manager' && status !== 'Pending') return false;
+      }
       const searchable = normalizeValue([row[0], row[1], row[2], getBranchName(row[2]), row[5], row[6], status].join(' '));
       return (!searchText || searchable.includes(searchText)) &&
         (statusFilter === 'All Statuses' || status === statusFilter);
@@ -5150,6 +5216,23 @@ function renderKaramayClaims() {
 
   const count = document.getElementById("karamayCount");
   if (count) count.innerText = `${rows.length} claim${rows.length !== 1 ? "s" : ""} listed`;
+}
+
+function karamayClaimBelongsToBranch(claim, branchId) {
+  if (!Array.isArray(claim)) return false;
+
+  const claimBranch = String(claim[2] || '').trim();
+  const userBranch = String(branchId || '').trim();
+  if (!claimBranch || !userBranch) return false;
+
+  const claimBranchValues = [claimBranch, getBranchName(claimBranch)]
+    .map(normalizeValue)
+    .filter(Boolean);
+  const userBranchValues = [userBranch, getBranchName(userBranch)]
+    .map(normalizeValue)
+    .filter(Boolean);
+
+  return claimBranchValues.some(value => userBranchValues.includes(value));
 }
 
 async function openKaramayClaimModal(id) {
@@ -5223,6 +5306,14 @@ async function openKaramayClaimModal(id) {
           <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Mode of Release</label>
           <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(row[9])}</p>
         </div>
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Branch Manager Reviewed By</label>
+          <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(row[13] || "Pending")}</p>
+        </div>
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Membership Specialist Verified By</label>
+          <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(row[17] || "Pending")}</p>
+        </div>
       </div>
 
       <div style="margin-bottom: 20px;">
@@ -5250,7 +5341,7 @@ async function openKaramayClaimModal(id) {
     modalFooter.querySelectorAll('.role-action-btn').forEach(btn => btn.remove());
 
     const role = getCurrentRole();
-    if ((role === 'branch_manager' || role === 'membership_specialist') && status === 'Pending') {
+    if (role === 'branch_manager' && status === 'Pending') {
       const returnBtn = document.createElement('button');
       returnBtn.className = 'btn red role-action-btn';
       returnBtn.style.cssText = 'margin-left: auto; margin-right: 10px;';
@@ -5260,7 +5351,22 @@ async function openKaramayClaimModal(id) {
 
       const verifyBtn = document.createElement('button');
       verifyBtn.className = 'btn green role-action-btn';
-      verifyBtn.textContent = 'Verified';
+      verifyBtn.textContent = 'Forward to Verifier';
+      verifyBtn.onclick = () => updateStatus(id, 'Under Verification');
+      modalFooter.appendChild(verifyBtn);
+    }
+
+    if (role === 'membership_specialist' && status === 'Under Verification') {
+      const returnBtn = document.createElement('button');
+      returnBtn.className = 'btn red role-action-btn';
+      returnBtn.style.cssText = 'margin-left: auto; margin-right: 10px;';
+      returnBtn.textContent = 'Return to Branch Manager';
+      returnBtn.onclick = () => updateStatus(id, 'Pending');
+      modalFooter.appendChild(returnBtn);
+
+      const verifyBtn = document.createElement('button');
+      verifyBtn.className = 'btn green role-action-btn';
+      verifyBtn.textContent = 'Verify and Forward';
       verifyBtn.onclick = () => updateStatus(id, 'Forwarded');
       modalFooter.appendChild(verifyBtn);
     }
@@ -6995,7 +7101,9 @@ async function printKaramayClaim() {
   const modeOfRelease = escapeHtml(String(r[9] || ''));
   const encodedBy = escapeHtml(String(r[11] || ''));
   const branchManager = escapeHtml(String(r[13] || ''));
+  const membershipSpecialist = escapeHtml(String(r[17] || settings.membershipSpecialistName || 'Membership Specialist'));
   const savingsApprovedBy = escapeHtml(String(r[14] || settings.savingsCreditHeadName || settings.financeManagerName || 'Savings and Credit Head'));
+  const membershipSpecialistSignature = settings.membershipSpecialistSignatureData || '';
   const savingsCreditHeadSignature = settings.savingsCreditHeadSignatureData || settings.financeManagerSignatureData || '';
   const notes = escapeHtml(String(r[15] || ''));
   const headerImageSrc = settings.reportHeaderImage || settings.headerImage || '';
@@ -7039,7 +7147,7 @@ async function printKaramayClaim() {
           .verification-label { min-width: 130px; }
           .remarks-row { display: flex; align-items: flex-start; gap: 10px; font-size: 12px; margin-bottom: 10px; }
           .remarks-row .remarks-line { flex: 1; border-bottom: 1px solid #111; padding: 4px 0; min-height: 18px; }
-          .footer-grid { display: grid; grid-template-columns: repeat(3, 1fr); gap: 12px; margin-top: 14px; text-align: center; align-items: start; }
+          .footer-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 12px; margin-top: 14px; text-align: center; align-items: start; }
           .footer-block { display: flex; flex-direction: column; justify-content: flex-start; padding-top: 0; border-top: none; font-size: 13px; line-height: 1.1; }
           .footer-block strong { display: block; margin: 0; }
           .footer-block .footer-role { display: block; margin: 0; font-size: 12px; line-height: 1.1; }
@@ -7144,6 +7252,12 @@ async function printKaramayClaim() {
               Noted by:<br><br>
               <strong>${branchManager}</strong>
               <span class="footer-role">Branch Manager/OIC</span>
+            </div>
+            <div class="footer-block">
+              Verified by:<br><br>
+              ${membershipSpecialistSignature ? `<img class="signature-preview" src="${escapeHtml(membershipSpecialistSignature)}" alt="Membership Specialist signature">` : ''}
+              <strong>${membershipSpecialist}</strong>
+              <span class="footer-role">Membership Specialist</span>
             </div>
             <div class="footer-block">
               Approved:<br><br>
