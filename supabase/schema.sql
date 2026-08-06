@@ -197,6 +197,7 @@ create table if not exists public.karamayclaims (
   status text not null default 'Pending',
   encoded_by text default '',
   branch_manager_reviewed_by text default '',
+  membership_specialist_verified_by text default '',
   savings_credit_approved_by text default '',
   remarks text default '',
   attachments jsonb not null default '[]'::jsonb,
@@ -219,6 +220,7 @@ alter table public.karamayclaims add column if not exists claim_status text defa
 alter table public.karamayclaims add column if not exists status text default 'Pending';
 alter table public.karamayclaims add column if not exists encoded_by text default '';
 alter table public.karamayclaims add column if not exists branch_manager_reviewed_by text default '';
+alter table public.karamayclaims add column if not exists membership_specialist_verified_by text default '';
 alter table public.karamayclaims add column if not exists savings_credit_approved_by text default '';
 alter table public.karamayclaims add column if not exists remarks text default '';
 alter table public.karamayclaims add column if not exists attachments jsonb default '[]'::jsonb;

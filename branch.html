@@ -371,12 +371,6 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
 <script>
 (function() {
   const role = String(localStorage.getItem("role") || "").trim().toLowerCase();
-  if (role === "verifier") {
-    const karamayButton = document.getElementById("karamayMenuButton");
-    if (karamayButton) {
-      karamayButton.style.display = "none";
-    }
-  }
   if (!["membership_specialist", "membershipspecialist", "mrdspecialist", "verifier", "processor"].includes(role)) {
     const memberDataButton = document.getElementById("memberDataMenuButton");
     if (memberDataButton) memberDataButton.style.display = "none";
