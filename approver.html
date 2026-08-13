@@ -11,7 +11,7 @@ const approverStoredRole = String(localStorage.getItem("role") || "").trim().toL
 const approverRoleKey = approverStoredRole.replace(/[^a-z0-9]/g, "");
 const approverRole = approverRoleAliases[approverStoredRole] || approverRoleAliases[approverRoleKey] || approverStoredRole;
 
-if (approverRole !== "savings_credit_head") {
+if (!sessionStorage.getItem("membersClaimsSessionToken") || approverRole !== "savings_credit_head") {
   window.location.href = "login.html";
 }
 </script>

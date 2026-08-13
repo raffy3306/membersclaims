@@ -1,6 +1,72 @@
-const API = "https://script.google.com/macros/s/AKfycbxMBjk5Mm_R_BIdBgrw2WnLQsYTTy3B6CBISQomfwAdlh5J56wof7tvf8GpPcsPauaH/exec";
+const API = "https://script.google.com/macros/s/AKfycbywfLp8KD-qrro3DzCY0ymdn_CgfN5UgltKGSeYLrYMNjsL7_vCaMhkPIrje6HkAiUCIw/exec";
 // Apps Script web apps reject CORS preflight OPTIONS requests, so POST JSON as plain text.
 const APPS_SCRIPT_JSON_HEADERS = { "Content-Type": "text/plain;charset=utf-8" };
+
+const SESSION_TOKEN_KEY = "membersClaimsSessionToken";
+const SESSION_EXPIRY_KEY = "membersClaimsSessionExpiresAt";
+const BROWSER_FETCH = window.fetch.bind(window);
+
+function getSessionToken() {
+  const expiresAt = Number(sessionStorage.getItem(SESSION_EXPIRY_KEY) || 0);
+  if (expiresAt && expiresAt <= Date.now()) {
+    clearClientSession();
+    return "";
+  }
+  return sessionStorage.getItem(SESSION_TOKEN_KEY) || "";
+}
+
+function withSessionToken(payload) {
+  const secured = { ...(payload || {}) };
+  const token = getSessionToken();
+  if (token) secured.sessionToken = token;
+  return secured;
+}
+
+function clearTellerReferenceCache() {
+  Object.keys(sessionStorage).forEach(key => {
+    if (key.startsWith("tellerReferenceData:")) sessionStorage.removeItem(key);
+  });
+}
+
+function clearClientSession() {
+  sessionStorage.removeItem(SESSION_TOKEN_KEY);
+  sessionStorage.removeItem(SESSION_EXPIRY_KEY);
+  clearTellerReferenceCache();
+  localStorage.removeItem("user");
+  localStorage.removeItem("role");
+  localStorage.removeItem("fullname");
+  localStorage.removeItem("position");
+  localStorage.removeItem("branchid");
+}
+
+function handleApiSecurityResult(data) {
+  if (!data || !["AUTH_REQUIRED", "PASSWORD_CHANGE_REQUIRED"].includes(data.code)) return data;
+  clearClientSession();
+  if (!/\b(login|index)\.html$/i.test(window.location.pathname)) {
+    alert(data.message || "Your session has expired. Please sign in again.");
+    window.location.href = "login.html";
+  }
+  return data;
+}
+
+async function apiFetch(input, init = {}) {
+  const url = getFetchUrl(input);
+  if (!url.startsWith(API)) return BROWSER_FETCH(input, init);
+
+  const options = { ...init };
+  if (typeof options.body === "string") {
+    try {
+      options.body = JSON.stringify(withSessionToken(JSON.parse(options.body)));
+    } catch (err) {
+      // Non-JSON bodies are left unchanged.
+    }
+  }
+  return BROWSER_FETCH(input, options);
+}
+
+// Route all existing API fetches through the session-token injector. This keeps
+// the rest of the application compatible while authorization moves server-side.
+window.fetch = apiFetch;
 
 const SUPABASE_TABLES = {
   users: "users",
@@ -112,7 +178,8 @@ const KARAMAY_CLAIM_HEADERS = [
   "SavingsCreditApprovedBy",
   "Notes",
   "Attachments",
-  "MembershipSpecialistVerifiedBy"
+  "MembershipSpecialistVerifiedBy",
+  "IntermentDate"
 ];
 
 function getSupabaseConfig() {
@@ -187,8 +254,7 @@ function callAppsScriptJsonp(payload, timeoutMs = 30000) {
     const url = new URL(API);
     let timeoutId;
 
-    console.log("callAppsScriptJsonp payload", payload);
-    console.log("callAppsScriptJsonp URL", API);
+    const securedPayload = withSessionToken(payload);
 
     function cleanup() {
       clearTimeout(timeoutId);
@@ -198,13 +264,29 @@ function callAppsScriptJsonp(payload, timeoutMs = 30000) {
 
     window[callbackName] = data => {
       cleanup();
-      console.log("callAppsScriptJsonp callback data", data);
-      resolve(data);
+      resolve(handleApiSecurityResult(data));
     };
 
-    script.onerror = () => {
+    script.onerror = async () => {
       cleanup();
-      reject(new Error("Google Apps Script request failed."));
+      // Some browsers reject the redirected Google-hosted script element even
+      // though the deployment returns a valid CORS-enabled JSONP response.
+      // Retry as a normal GET and parse only this request's exact callback.
+      try {
+        const response = await BROWSER_FETCH(url.toString(), { cache: "no-store" });
+        const responseText = await response.text();
+        if (!response.ok) {
+          throw new Error(`Google Apps Script returned HTTP ${response.status}.`);
+        }
+        const prefix = `${callbackName}(`;
+        if (!responseText.startsWith(prefix) || !responseText.trimEnd().endsWith(");")) {
+          throw new Error(describeApiParseError(responseText));
+        }
+        const jsonText = responseText.trim().slice(prefix.length, -2);
+        resolve(handleApiSecurityResult(JSON.parse(jsonText)));
+      } catch (fallbackError) {
+        reject(new Error(fallbackError.message || "Google Apps Script request failed."));
+      }
     };
 
     timeoutId = setTimeout(() => {
@@ -212,7 +294,7 @@ function callAppsScriptJsonp(payload, timeoutMs = 30000) {
       reject(new Error("Google Apps Script request timed out."));
     }, timeoutMs);
 
-    url.searchParams.set("payload", JSON.stringify(payload));
+    url.searchParams.set("payload", JSON.stringify(securedPayload));
     url.searchParams.set("callback", callbackName);
     script.src = url.toString();
     document.body.appendChild(script);
@@ -229,7 +311,7 @@ async function submitAppsScriptWrite(payload, timeoutMs = 30000) {
     {
       method: "POST",
       mode: "no-cors",
-      body: JSON.stringify(payload)
+      body: JSON.stringify(withSessionToken(payload))
     },
     timeoutMs,
     "Google Apps Script write request timed out."
@@ -631,7 +713,8 @@ function karamayClaimToLegacyRow(claim) {
     pickField(claim, ["savings_credit_approved_by", "approved_by"], ""),
     pickField(claim, ["remarks", "notes"], ""),
     normalizeAttachments(pickField(claim, ["attachments"], [])),
-    pickField(claim, ["membership_specialist_verified_by", "verified_by"], "")
+    pickField(claim, ["membership_specialist_verified_by", "verified_by"], ""),
+    pickField(claim, ["interment_date"], "")
   ];
 }
 
@@ -660,6 +743,7 @@ async function supabaseCreateKaramayClaim(data) {
     member_branch_id: data.memberBranchId || data.branchid || "",
     member_address: data.memberAddress || "",
     date_of_death: data.dateOfDeath || null,
+    interment_date: data.intermentDate || null,
     beneficiary_name: data.beneficiaryName || "",
     relationship: data.relationship || "",
     beneficiary_address: data.beneficiaryAddress || "",
@@ -677,7 +761,7 @@ async function supabaseCreateKaramayClaim(data) {
     last_updated_by: data.tellerEmail || data.tellerName || ""
   };
 
-  if (!request.member_name || !request.member_branch_id || !request.member_address || !request.date_of_death) {
+  if (!request.member_name || !request.member_branch_id || !request.member_address || !request.date_of_death || !request.interment_date) {
     return { success: false, message: "Please complete the deceased member information." };
   }
 
@@ -736,6 +820,7 @@ async function supabaseEditKaramayClaim(data) {
     member_branch_id: data.memberBranchId || data.branchid || "",
     member_address: data.memberAddress || "",
     date_of_death: data.dateOfDeath || null,
+    interment_date: data.intermentDate || null,
     beneficiary_name: data.beneficiaryName || "",
     relationship: data.relationship || "",
     beneficiary_address: data.beneficiaryAddress || "",
@@ -1487,6 +1572,7 @@ let allUsers = [];
 let allMembers = [];
 let allBranches = [];
 let allHospitals = [];
+let tellerMemberDiagnostics = {};
 let allKaramayClaims = [KARAMAY_CLAIM_HEADERS];
 let karamayClaimsPromise = null;
 let editingKaramayClaimId = null;
@@ -1512,6 +1598,8 @@ function persistSession(data) {
   localStorage.setItem("fullname", fullname);
   localStorage.setItem("position", position);
   localStorage.setItem("branchid", branchid);
+  if (data.sessionToken) sessionStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
+  if (data.sessionExpiresAt) sessionStorage.setItem(SESSION_EXPIRY_KEY, String(data.sessionExpiresAt));
 }
 
 function redirectToDashboard(role) {
@@ -1559,7 +1647,7 @@ async function parseApiJsonResponse(response) {
   const text = await response.text();
 
   try {
-    return JSON.parse(text);
+    return handleApiSecurityResult(JSON.parse(text));
   } catch (err) {
     throw new Error(describeApiParseError(text));
   }
@@ -1604,12 +1692,12 @@ async function login() {
       action: "login",
       email,
       password
-    });
-
-    console.log("login result", data);
+    }, 90000);
 
     if (data.success) {
       if (data.mustChangePassword) {
+        if (data.sessionToken) sessionStorage.setItem(SESSION_TOKEN_KEY, data.sessionToken);
+        if (data.sessionExpiresAt) sessionStorage.setItem(SESSION_EXPIRY_KEY, String(data.sessionExpiresAt));
         pendingLoginData = {
           ...data,
           email,
@@ -1728,6 +1816,12 @@ async function submitFirstLoginPasswordChange() {
       return;
     }
 
+    pendingLoginData = {
+      ...pendingLoginData,
+      sessionToken: data.sessionToken || pendingLoginData.sessionToken,
+      sessionExpiresAt: data.sessionExpiresAt || pendingLoginData.sessionExpiresAt,
+      mustChangePassword: false
+    };
     persistSession(pendingLoginData);
     closeFirstLoginPasswordModal();
     pendingLoginData = null;
@@ -1797,11 +1891,16 @@ async function requestPasswordReset() {
 }
 
 function logout() {
-  localStorage.removeItem("user");
-  localStorage.removeItem("role");
-  localStorage.removeItem("fullname");
-  localStorage.removeItem("position");
-  localStorage.removeItem("branchid");
+  const token = getSessionToken();
+  if (token) {
+    BROWSER_FETCH(API, {
+      method: "POST",
+      headers: APPS_SCRIPT_JSON_HEADERS,
+      body: JSON.stringify({ action: "logout", sessionToken: token }),
+      keepalive: true
+    }).catch(() => {});
+  }
+  clearClientSession();
   window.location.href = "login.html";
 }
 
@@ -1872,6 +1971,7 @@ function populateKaramayClaimForm(row) {
   setInputValue("karamayMemberBranchId", row[2] || localStorage.getItem("branchid") || "");
   setInputValue("karamayMemberAddress", row[3] || "");
   setInputValue("karamayDateOfDeath", row[4] || "");
+  setInputValue("karamayIntermentDate", row[18] || "");
   setInputValue("karamayBeneficiaryName", row[5] || "");
   setInputValue("karamayRelationship", row[6] || "");
   setInputValue("karamayBeneficiaryAddress", row[7] || "");
@@ -2030,14 +2130,52 @@ function renderTellerReferenceOptions() {
   }
 }
 
-async function loadTellerReferenceData() {
+function setTellerReferenceStatus(message, type = "loading") {
+  const status = document.getElementById("tellerReferenceStatus");
+  const retryButton = document.getElementById("tellerReferenceRetry");
+  const memberInput = document.getElementById("requestMember");
   const hospitalSelect = document.getElementById("requestHospital");
-  if (hospitalSelect && !allHospitals.length) {
+  const submitButton = document.getElementById("requestSubmitButton");
+  const isLoading = type === "loading";
+  const hasError = type === "error";
+  const isUnavailable = isLoading || hasError || type === "warning";
+
+  if (status) {
+    status.textContent = message || "";
+    status.style.display = message ? "block" : "none";
+    status.style.color = hasError ? "#b42318" : type === "warning" ? "#92400e" : "#475467";
+  }
+  if (retryButton) retryButton.style.display = (hasError || type === "warning") ? "inline-flex" : "none";
+  if (memberInput) {
+    memberInput.disabled = isLoading;
+    memberInput.placeholder = isLoading
+      ? "Loading members..."
+      : allMembers.length ? "Search member name or ID" : "No active members found";
+  }
+  if (hospitalSelect) hospitalSelect.disabled = isLoading;
+  if (submitButton) submitButton.disabled = isUnavailable;
+}
+
+function isActiveReferenceStatus(value) {
+  const status = normalizeValue(value).replace(/[^a-z0-9]/g, "");
+  return status === "active" ||
+    status === "activemember" ||
+    status.startsWith("activegoodstanding") ||
+    ["yes", "true", "1"].includes(status);
+}
+
+async function loadTellerReferenceData(forceRefresh = false) {
+  const hospitalSelect = document.getElementById("requestHospital");
+  if (hospitalSelect && (forceRefresh || !allHospitals.length)) {
     hospitalSelect.innerHTML = '<option value="">Loading hospitals...</option>';
   }
+  setTellerReferenceStatus("Loading active members and hospitals...", "loading");
 
-  const cacheKey = "tellerReferenceData:v1";
+  const userKey = normalizeValue(localStorage.getItem("user") || "anonymous");
+  const branchKey = normalizeValue(localStorage.getItem("branchid") || "no-branch");
+  const cacheKey = `tellerReferenceData:v4:${userKey}:${branchKey}`;
   let referenceData = null;
+  if (forceRefresh) sessionStorage.removeItem(cacheKey);
   try {
     const cached = JSON.parse(sessionStorage.getItem(cacheKey) || "null");
     if (cached && cached.expiresAt > Date.now() && cached.data) referenceData = cached.data;
@@ -2046,12 +2184,14 @@ async function loadTellerReferenceData() {
   }
 
   if (!referenceData) {
-    const bundledRes = await fetch(API, {
-      method: "POST",
-      headers: APPS_SCRIPT_JSON_HEADERS,
-      body: JSON.stringify({ action: "getTellerReferenceData" })
-    });
-    referenceData = await parseApiJsonResponse(bundledRes);
+    try {
+      referenceData = await callAppsScriptJsonp({ action: "getTellerReferenceData" }, 60000);
+    } catch (err) {
+      const message = err?.message || "Unable to load members and hospitals.";
+      setTellerReferenceStatus(message, "error");
+      if (hospitalSelect) hospitalSelect.innerHTML = '<option value="">Unable to load hospitals</option>';
+      throw err;
+    }
 
     if (referenceData && referenceData.success) {
       try {
@@ -2065,12 +2205,31 @@ async function loadTellerReferenceData() {
     }
   }
 
+  if (!referenceData || !referenceData.success) {
+    const message = referenceData?.message || "Unable to load members and hospitals.";
+    setTellerReferenceStatus(message, "error");
+    if (hospitalSelect) hospitalSelect.innerHTML = '<option value="">Unable to load hospitals</option>';
+    throw new Error(message);
+  }
+
   const membersData = { success: Boolean(referenceData?.success), members: referenceData?.members || [], message: referenceData?.message };
   const branchesData = { success: Boolean(referenceData?.success), branches: referenceData?.branches || [], message: referenceData?.message };
   const hospitalsData = { success: Boolean(referenceData?.success), hospitals: referenceData?.hospitals || [], message: referenceData?.message };
   const ratesData = { success: Boolean(referenceData?.success), rates: referenceData?.rates || [], message: referenceData?.message };
+  tellerMemberDiagnostics = referenceData?.memberDiagnostics || {};
 
-  if (membersData.success) allMembers = membersData.members || [];
+  if (membersData.success) {
+    const seenMemberIds = new Set();
+    allMembers = (membersData.members || [])
+      .filter(member => member && member.memberID && member.fullName && isActiveReferenceStatus(member.status))
+      .filter(member => {
+        const key = normalizeValue(member.memberID);
+        if (seenMemberIds.has(key)) return false;
+        seenMemberIds.add(key);
+        return true;
+      })
+      .sort((a, b) => String(a.fullName).localeCompare(String(b.fullName)));
+  }
   else console.warn("Unable to load members:", membersData.message);
 
   if (branchesData.success) {
@@ -2085,8 +2244,15 @@ async function loadTellerReferenceData() {
   else console.warn("Unable to load branches:", branchesData.message);
 
   if (hospitalsData.success) {
+    const seenHospitalIds = new Set();
     allHospitals = (hospitalsData.hospitals || [])
-      .filter(hospital => hospital && hospital.name)
+      .filter(hospital => hospital && hospital.id && hospital.name)
+      .filter(hospital => {
+        const key = normalizeValue(hospital.id);
+        if (seenHospitalIds.has(key)) return false;
+        seenHospitalIds.add(key);
+        return true;
+      })
       .sort((a, b) => String(a.name).localeCompare(String(b.name)));
   }
   else console.warn("Unable to load hospitals:", hospitalsData.message);
@@ -2105,6 +2271,25 @@ async function loadTellerReferenceData() {
   }
 
   renderTellerReferenceOptions();
+  if (!allMembers.length || !allHospitals.length) {
+    let memberMessage = "";
+    if (!allMembers.length) {
+      const details = tellerMemberDiagnostics;
+      if (Number(details.rowsWithMemberId || 0) === 0) {
+        memberMessage = "No member rows with a MemberID were found in Members.";
+      } else if (Number(details.activeRows || 0) === 0) {
+        memberMessage = `Members has ${details.rowsWithMemberId} member row(s), but none has a recognized Active status.`;
+      } else if (Number(details.branchMatchedRows || 0) === 0) {
+        memberMessage = `No Members.Branch value matches this CRS BranchId (${details.crsBranchId || "blank"}). Check the Branches sheet mapping.`;
+      } else {
+        memberMessage = "No active member belongs to this CRS branch.";
+      }
+    }
+    const hospitalMessage = !allHospitals.length ? "No active hospitals were found." : "";
+    setTellerReferenceStatus([memberMessage, hospitalMessage].filter(Boolean).join(" ") + " Check the source sheets, then retry.", "warning");
+  } else {
+    setTellerReferenceStatus(`${allMembers.length} active member(s) and ${allHospitals.length} hospital(s) loaded.`, "success");
+  }
   const selectedMember = getSelectedRequestMember();
   if (selectedMember) {
     setInputValue("requestBranch", selectedMember.branchName || getBranchName(selectedMember.branch) || selectedMember.branch || "");
@@ -3206,7 +3391,7 @@ async function printRequest() {
       method: "POST",
       body: JSON.stringify({ action: "getSettings" })
     });
-    const settingsData = await settingsRes.json();
+    const settingsData = await parseApiJsonResponse(settingsRes);
     settings = settingsData.settings || {};
     console.log('Print settings loaded:', settings);
   } catch (err) {
@@ -3580,7 +3765,7 @@ function loadBranchSubmitted() {
     method: 'POST',
     body: JSON.stringify({ action: 'getRequests', includeAttachments: false })
   })
-    .then(res => res.json())
+    .then(res => parseApiJsonResponse(res))
     .then(data => {
       let html = '';
       let count = 0;
@@ -4006,7 +4191,7 @@ async function submitMemberForm() {
   try {
     const result = await sendMemberDataAction(payload);
     if (!result.success) throw new Error(result.message || "Unable to save member.");
-    sessionStorage.removeItem("tellerReferenceData:v1");
+    clearTellerReferenceCache();
     closeMemberModal();
     memberDataRows = [];
     await loadMemberData(true);
@@ -4023,7 +4208,7 @@ async function toggleMemberStatus(memberId, status) {
     if (!result.success) throw new Error(result.message || "Unable to update member status.");
     const member = memberDataRows.find(item => item.memberID === memberId);
     if (member) member.status = status;
-    sessionStorage.removeItem("tellerReferenceData:v1");
+    clearTellerReferenceCache();
     renderMemberDataTable();
   } catch (err) {
     alert(err.message || "Unable to update member status.");
@@ -4077,7 +4262,7 @@ async function importMembersFromCsv(input) {
     if (!window.confirm(`Import ${members.length} member row${members.length === 1 ? "" : "s"}? Existing Member IDs will be updated.`)) return;
     const result = await sendMemberDataAction({ action: "importMembers", members });
     if (!result.success) throw new Error(result.message || "Unable to import members.");
-    sessionStorage.removeItem("tellerReferenceData:v1");
+    clearTellerReferenceCache();
     memberDataRows = [];
     await loadMemberData(true);
     const errorNote = result.errors?.length ? `\n${result.errors.join("\n")}` : "";
@@ -4352,7 +4537,7 @@ async function submitUserForm() {
         firstLogin
       })
     });
-    const data = await res.json();
+    const data = await parseApiJsonResponse(res);
 
     if (!data.success) {
       alert(data.message || 'Failed to save user.');
@@ -4477,7 +4662,7 @@ async function loadSettings() {
       method: 'POST',
       body: JSON.stringify({ action: 'getSettings' })
     });
-    const data = await res.json();
+    const data = await parseApiJsonResponse(res);
     const settings = data.settings || {};
 
     const tellerSignatory = document.getElementById('tellerSignatory');
@@ -4535,7 +4720,7 @@ async function saveSignatorySettings() {
       savingsCreditHeadName: savingsCreditHeadSignatory
     }})
   });
-  const data = await res.json();
+  const data = await parseApiJsonResponse(res);
   if (data.success) {
     alert('Settings saved successfully.');
   } else {
@@ -4626,7 +4811,7 @@ function uploadSignature(role) {
         headers: APPS_SCRIPT_JSON_HEADERS,
         body: JSON.stringify({ action: 'saveSignature', role: role, mimeType: file.type, fileBase64: base64 })
       });
-      const data = await res.json();
+      const data = await parseApiJsonResponse(res);
       if (!data || !data.success) {
         alert('Failed to upload signature.');
       } else {
@@ -4702,7 +4887,7 @@ function uploadLogo() {
       method: 'POST',
       body: JSON.stringify({ action: 'saveSettings', settings: { reportHeaderImage: dataUrl } })
     });
-    const data = await res.json();
+    const data = await parseApiJsonResponse(res);
     if (!data.success) {
       alert('Failed to upload logo.');
     } else {
@@ -4754,7 +4939,7 @@ async function saveSegmentationRates() {
         }
       })
     });
-    const data = await res.json();
+    const data = await parseApiJsonResponse(res);
     if (data.success) {
       alert('Segmentation rates saved successfully.');
       loadSettings(); // Refresh the values
@@ -4870,6 +5055,7 @@ function resetKaramayClaimForm() {
     "karamayMemberBranchId",
     "karamayMemberAddress",
     "karamayDateOfDeath",
+    "karamayIntermentDate",
     "karamayBeneficiaryName",
     "karamayRelationship",
     "karamayBeneficiaryAddress",
@@ -4937,6 +5123,7 @@ async function submitKaramayClaimOnce() {
     memberBranchId: getInputTrim("karamayMemberBranchId") || localStorage.getItem("branchid") || "",
     memberAddress: getInputTrim("karamayMemberAddress"),
     dateOfDeath: getInputTrim("karamayDateOfDeath"),
+    intermentDate: getInputTrim("karamayIntermentDate"),
     beneficiaryName: getInputTrim("karamayBeneficiaryName"),
     relationship: getInputTrim("karamayRelationship"),
     beneficiaryAddress: getInputTrim("karamayBeneficiaryAddress"),
@@ -4948,7 +5135,7 @@ async function submitKaramayClaimOnce() {
     attachments: attachmentsToSend
   };
 
-  if (!payload.memberName || !payload.memberBranchId || !payload.memberAddress || !payload.dateOfDeath) {
+  if (!payload.memberName || !payload.memberBranchId || !payload.memberAddress || !payload.dateOfDeath || !payload.intermentDate) {
     alert("Please complete the deceased member information.");
     return;
   }
@@ -4981,7 +5168,8 @@ async function submitKaramayClaimOnce() {
     "",
     "",
     attachmentsToSend,
-    ""
+    "",
+    payload.intermentDate
   ];
 
   async function verifyKaramayUpdate(attempts = 4, intervalMs = 1200) {
@@ -5024,7 +5212,7 @@ async function submitKaramayClaimOnce() {
     const payloadInput = document.getElementById('karamayUploadPayload');
     if (!form || !payloadInput) return false;
     try {
-      payloadInput.value = JSON.stringify(payload);
+      payloadInput.value = JSON.stringify(withSessionToken(payload));
       form.action = API;
       form.submit();
       return verifyKaramayUpdate();
@@ -5282,6 +5470,10 @@ async function openKaramayClaimModal(id) {
         <div>
           <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Date of Death</label>
           <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(row[4])}</p>
+        </div>
+        <div>
+          <label style="font-size: 11px; color: #999; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 5px;">Interment Date</label>
+          <p style="margin: 0; font-size: 14px; color: #333;">${escapeHtml(row[18] || "-")}</p>
         </div>
       </div>
 
@@ -6197,6 +6389,16 @@ function openClaimsSummaryModal() {
   resetClaimsSummaryResults();
   const reportType = document.getElementById("claimsReportType");
   if (reportType) reportType.value = "";
+  const today = new Date();
+  const localToday = [
+    today.getFullYear(),
+    String(today.getMonth() + 1).padStart(2, "0"),
+    String(today.getDate()).padStart(2, "0")
+  ].join("-");
+  const dateFrom = document.getElementById("claimsReportDateFrom");
+  const dateTo = document.getElementById("claimsReportDateTo");
+  if (dateFrom) dateFrom.value = `${today.getFullYear()}-01-01`;
+  if (dateTo) dateTo.value = localToday;
   handleClaimsReportTypeChange();
   modal.style.display = "flex";
   modal.style.pointerEvents = "auto";
@@ -6240,32 +6442,32 @@ function findReportMember(request) {
   ) || null;
 }
 
-function renderHospitalizationClaimsSummary(requests) {
-  const approvedClaims = (Array.isArray(requests) ? requests.slice(1) : [])
-    .filter(row => Array.isArray(row) && String(row[7] || "").trim() === "Approved");
+function getClaimsReportDateRangeLabel(dateFrom, dateTo) {
+  return `${formatReportDate(dateFrom)} to ${formatReportDate(dateTo)}`;
+}
+
+function renderHospitalizationClaimsSummary(claims, dateFrom, dateTo) {
+  const approvedClaims = Array.isArray(claims) ? claims : [];
   const grandTotal = approvedClaims.reduce(
-    (total, row) => total + (Number(row[5]) || 0),
+    (total, claim) => total + (Number(claim.amount) || 0),
     0
   );
 
-  const rows = approvedClaims.map((row, index) => {
-    const member = findReportMember(row);
-    const branch = getRequestBranchName(row) || member?.branchName || getBranchName(member?.branch) || member?.branch || "-";
-    const address = member?.address || member?.memberAddress || "-";
+  const rows = approvedClaims.map((claim, index) => {
     return `<tr>
       <td>${index + 1}</td>
-      <td>${escapeHtml(branch)}</td>
-      <td>${escapeHtml(row[1] || "-")}</td>
-      <td>${escapeHtml(address)}</td>
-      <td>${escapeHtml(row[18] || member?.segmentation || "-")}</td>
-      <td>${escapeHtml(row[3] ?? 0)}</td>
-      <td class="report-amount">&#8369;${escapeHtml(formatNumber(row[5]))}</td>
+      <td>${escapeHtml(claim.branchName || "-")}</td>
+      <td>${escapeHtml(claim.memberName || "-")}</td>
+      <td>${escapeHtml(claim.segmentation || "-")}</td>
+      <td>${escapeHtml(claim.daysComputed ?? 0)}</td>
+      <td class="report-amount">&#8369;${escapeHtml(formatNumber(claim.amount))}</td>
     </tr>`;
   }).join("");
 
   return `
     <div class="report-print-header">
       <h1>Hospitalization Claims Summary</h1>
+      <p>Approved claims &middot; Date filed: ${escapeHtml(getClaimsReportDateRangeLabel(dateFrom, dateTo))}</p>
     </div>
     <div class="report-preview-label">Report Preview</div>
     <div class="report-summary-heading">
@@ -6275,13 +6477,13 @@ function renderHospitalizationClaimsSummary(requests) {
     <div class="report-table-wrap">
       <table class="report-table">
         <thead><tr>
-          <th>NO.</th><th>BRANCH NAME</th><th>NAME OF CLAIMANT</th><th>ADDRESS</th>
+          <th>NO.</th><th>BRANCH NAME</th><th>NAME OF CLAIMANT</th>
           <th>SEGMENTATION</th><th>DAYS COMPUTED</th><th>AMOUNT CLAIMED</th>
         </tr></thead>
-        <tbody>${rows || '<tr><td colspan="7" style="text-align:center;">No approved hospitalization claims found.</td></tr>'}</tbody>
+        <tbody>${rows || '<tr><td colspan="6" style="text-align:center;">No approved hospitalization claims found.</td></tr>'}</tbody>
         <tfoot>
           <tr class="report-grand-total">
-            <td colspan="6" style="text-align:right;">TOTAL AMOUNT CLAIMED</td>
+            <td colspan="5" style="text-align:right;">TOTAL AMOUNT CLAIMED</td>
             <td class="report-amount">&#8369;${escapeHtml(formatNumber(grandTotal))}</td>
           </tr>
         </tfoot>
@@ -6291,31 +6493,50 @@ function renderHospitalizationClaimsSummary(requests) {
 
 function getKaramayReportReleaseMode(value) {
   const normalized = normalizeValue(value);
-  if (normalized.includes("actual delivery")) {
-    return { key: "actual_delivery", label: "Actual Delivery", amount: 3000 };
-  }
-  if (normalized.includes("cash equivalent")) {
+  const compact = normalized.replace(/[^a-z0-9]/g, "");
+
+  if (
+    compact.includes("cashequivalent") ||
+    compact.includes("2000") ||
+    compact === "cash" ||
+    compact.includes("php2000") ||
+    compact.includes("peso2000") ||
+    compact === "2000"
+  ) {
     return { key: "cash_equivalent", label: "Cash Equivalent", amount: 2000 };
   }
-  return { key: "actual_delivery", label: "Actual Delivery", amount: 3000 };
+  if (
+    compact.includes("actualdelivery") ||
+    compact.includes("bouquetandcash") ||
+    compact.includes("php3000") ||
+    compact.includes("peso3000") ||
+    compact === "3000"
+  ) {
+    return { key: "actual_delivery", label: "Actual Delivery", amount: 3000 };
+  }
+
+  return {
+    key: "unknown",
+    label: String(value || "Unspecified"),
+    amount: 0
+  };
 }
 
-function renderKaramayClaimsSummary(claims, selectedReleaseMode = "both") {
-  const claimRows = (Array.isArray(claims) ? claims.slice(1) : [])
-    .filter(row => Array.isArray(row) && String(row[10] || "").trim() === "Approved")
-    .map(row => ({ row, release: getKaramayReportReleaseMode(row[9]) }))
+function renderKaramayClaimsSummary(claims, selectedReleaseMode = "both", dateFrom = "", dateTo = "") {
+  const claimRows = (Array.isArray(claims) ? claims : [])
+    .map(claim => ({ claim, release: getKaramayReportReleaseMode(claim.modeOfRelease) }))
     .filter(item => selectedReleaseMode === "both" || item.release.key === selectedReleaseMode);
   const grandTotal = claimRows.reduce((total, item) => total + item.release.amount, 0);
   const rows = claimRows.map((item, index) => {
-    const row = item.row;
+    const claim = item.claim;
     return `<tr>
       <td>${index + 1}</td>
-      <td>${escapeHtml(getBranchName(row[2]) || row[2] || "-")}</td>
-      <td>${escapeHtml(row[1] || "-")}</td>
-      <td>${escapeHtml(row[3] || "-")}</td>
-      <td>${escapeHtml(formatReportDate(row[4]))}</td>
-      <td>${escapeHtml(row[5] || "-")}</td>
-      <td>${escapeHtml(row[6] || "-")}</td>
+      <td>${escapeHtml(claim.branchName || "-")}</td>
+      <td>${escapeHtml(claim.memberName || "-")}</td>
+      <td>${escapeHtml(claim.address || "-")}</td>
+      <td>${escapeHtml(formatReportDate(claim.dateOfDeath))}</td>
+      <td>${escapeHtml(claim.beneficiaryName || "-")}</td>
+      <td>${escapeHtml(claim.relationship || "-")}</td>
       <td>${escapeHtml(item.release.label)}</td>
       <td class="report-amount">&#8369;${escapeHtml(formatNumber(item.release.amount))}</td>
     </tr>`;
@@ -6329,7 +6550,7 @@ function renderKaramayClaimsSummary(claims, selectedReleaseMode = "both") {
   return `
     <div class="report-print-header">
       <h1>Karamay Claims Summary</h1>
-      <p>Approved claims only &middot; Mode of Release: ${escapeHtml(selectedLabel)}</p>
+      <p>Approved claims &middot; Date filed: ${escapeHtml(getClaimsReportDateRangeLabel(dateFrom, dateTo))} &middot; Mode of Release: ${escapeHtml(selectedLabel)}</p>
     </div>
     <div class="report-preview-label">Report Preview</div>
     <div class="report-summary-heading">
@@ -6372,8 +6593,9 @@ function toggleClaimsExportMenu(event) {
 
 function getClaimsReportExportBaseName() {
   const reportType = document.getElementById("claimsReportType")?.value || "claims";
-  const date = new Date().toISOString().slice(0, 10);
-  return `${reportType === "karamay" ? "karamay-claims" : "hospitalization-claims"}-${date}`;
+  const dateFrom = document.getElementById("claimsReportDateFrom")?.value || "from";
+  const dateTo = document.getElementById("claimsReportDateTo")?.value || "to";
+  return `${reportType === "karamay" ? "karamay-claims" : "hospitalization-claims"}-${dateFrom}-to-${dateTo}`;
 }
 
 function getClaimsReportTable() {
@@ -6579,6 +6801,8 @@ function printClaimsSummaryReport(exportAsPdf = false) {
 
 async function generateClaimsSummaryReport() {
   const reportType = document.getElementById("claimsReportType")?.value || "";
+  const dateFrom = document.getElementById("claimsReportDateFrom")?.value || "";
+  const dateTo = document.getElementById("claimsReportDateTo")?.value || "";
   const status = document.getElementById("claimsSummaryReportStatus");
   const results = document.getElementById("claimsSummaryReportResults");
   const button = document.getElementById("generateClaimsReportButton");
@@ -6587,6 +6811,20 @@ async function generateClaimsSummaryReport() {
   if (!reportType) {
     if (status) {
       status.textContent = "Please select a report type.";
+      status.classList.add("error");
+    }
+    return;
+  }
+  if (!dateFrom || !dateTo) {
+    if (status) {
+      status.textContent = "Please select both Date From and Date To.";
+      status.classList.add("error");
+    }
+    return;
+  }
+  if (dateFrom > dateTo) {
+    if (status) {
+      status.textContent = "Date From cannot be later than Date To.";
       status.classList.add("error");
     }
     return;
@@ -6602,19 +6840,19 @@ async function generateClaimsSummaryReport() {
   if (exportGroup) exportGroup.style.display = "none";
 
   try {
+    const report = await callAppsScriptJsonp({
+      action: "getClaimsSummaryReport",
+      reportType,
+      dateFrom,
+      dateTo
+    }, 60000);
+    if (!report?.success) throw new Error(report?.message || "Unable to generate the report.");
+
     if (reportType === "hospitalization") {
-      const [requests] = await Promise.all([
-        loadWorkflowRequests(true),
-        memberDataRows.length && allBranches.length ? Promise.resolve() : loadMemberData(true)
-      ]);
-      if (results) results.innerHTML = renderHospitalizationClaimsSummary(requests);
+      if (results) results.innerHTML = renderHospitalizationClaimsSummary(report.claims, dateFrom, dateTo);
     } else {
-      const [claims] = await Promise.all([
-        loadKaramayClaims(true),
-        allBranches.length ? Promise.resolve() : loadMemberData(true)
-      ]);
       const releaseMode = document.getElementById("karamayReportReleaseMode")?.value || "both";
-      if (results) results.innerHTML = renderKaramayClaimsSummary(claims, releaseMode);
+      if (results) results.innerHTML = renderKaramayClaimsSummary(report.claims, releaseMode, dateFrom, dateTo);
     }
     if (status) status.textContent = "Report generated successfully. Review, print, or export the report below.";
     if (printButton) printButton.style.display = "inline-flex";
@@ -6720,11 +6958,10 @@ async function printRequest() {
 
   let settings = {};
   try {
-    const settingsRes = await fetch(API, {
-      method: "POST",
-      body: JSON.stringify({ action: "getSettings" })
-    });
-    const settingsData = await settingsRes.json();
+    const settingsData = await callAppsScriptJsonp({ action: "getSettings" }, 60000);
+    if (!settingsData?.success) {
+      throw new Error(settingsData?.message || "Unable to load print settings.");
+    }
     settings = settingsData.settings || {};
   } catch (err) {
     console.warn("Unable to load print settings:", err);
@@ -6763,7 +7000,7 @@ async function printRequest() {
         method: "POST",
         body: JSON.stringify({ action: "getRequests", includeAttachments: false })
       });
-      const requestsData = await requestsRes.json();
+      const requestsData = await parseApiJsonResponse(requestsRes);
       if (Array.isArray(requestsData)) {
         allRequests = requestsData;
         return requestsData;
@@ -6873,9 +7110,10 @@ async function printRequest() {
     ? `<img class="sig-image" src="${escapeHtml(src)}" alt="${escapeHtml(alt)}">`
     : `<div class="sig-space"></div>`;
 
+  const fallbackLogo = `<div id="coopLogoFallback" class="coop-logo-placeholder"${headerImageSrc ? ' style="display:none"' : ""}><div class="coop-text">coop</div><div class="coop-tagline">Our future, today.</div></div>`;
   const logoHtml = headerImageSrc
-    ? `<img class="coop-logo" src="${escapeHtml(headerImageSrc)}" alt="Cooperative logo">`
-    : `<div class="coop-logo-placeholder"><div class="coop-text">coop</div><div class="coop-tagline">Our future, today.</div></div>`;
+    ? `<img id="coopLogoImage" class="coop-logo" src="${escapeHtml(headerImageSrc)}" alt="Cooperative logo" onerror="this.style.display='none';document.getElementById('coopLogoFallback').style.display='block'">${fallbackLogo}`
+    : fallbackLogo;
 
   const printWindow = window.open("", "PRINT", "height=900,width=900");
   if (!printWindow) return;
@@ -7045,11 +7283,21 @@ async function printRequest() {
   `);
   printWindow.document.close();
 
-  setTimeout(() => {
-    printWindow.focus();
-    printWindow.print();
-    printWindow.close();
-  }, 500);
+  const printImages = Array.from(printWindow.document.images || []);
+  await Promise.race([
+    Promise.all(printImages.map(image => {
+      if (image.complete) return Promise.resolve();
+      return new Promise(resolve => {
+        image.addEventListener("load", resolve, { once: true });
+        image.addEventListener("error", resolve, { once: true });
+      });
+    })),
+    wait(5000)
+  ]);
+  await wait(150);
+  printWindow.focus();
+  printWindow.print();
+  printWindow.close();
 }
 
 async function printKaramayClaim() {
@@ -7074,7 +7322,7 @@ async function printKaramayClaim() {
       method: 'POST',
       body: JSON.stringify({ action: 'getSettings' })
     });
-    const settingsData = await settingsRes.json();
+    const settingsData = await parseApiJsonResponse(settingsRes);
     settings = settingsData.settings || {};
   } catch (err) {
     console.warn('Unable to load print settings:', err);
@@ -7094,6 +7342,7 @@ async function printKaramayClaim() {
   const branch = escapeHtml(getBranchName(r[2]) || String(r[2] || ''));
   const deceasedAddress = escapeHtml(String(r[3] || ''));
   const dateOfDeath = escapeHtml(String(r[4] || ''));
+  const intermentDate = escapeHtml(String(r[18] || ''));
   const beneficiaryName = escapeHtml(String(r[5] || ''));
   const beneficiaryAddress = escapeHtml(String(r[7] || ''));
   const relationship = escapeHtml(String(r[6] || ''));
@@ -7194,6 +7443,7 @@ async function printKaramayClaim() {
             <div class="field-line"><span class="field-label">Branch:</span><span class="field-value">${branch}</span></div>
             <div class="field-line"><span class="field-label">Address:</span><span class="field-value">${deceasedAddress}</span></div>
             <div class="field-line"><span class="field-label">Date of Death:</span><span class="field-value">${dateOfDeath}</span></div>
+            <div class="field-line"><span class="field-label">Interment Date:</span><span class="field-value">${intermentDate}</span></div>
           </div>
 
           <div class="section-title">II. BENEFICIARY / REQUESTOR INFORMATION</div>

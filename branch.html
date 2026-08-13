@@ -2,7 +2,7 @@
 <html>
 
 <script>
-if (!["membership_specialist", "branch_manager", "verifier", "processor"].includes(localStorage.getItem("role"))) {
+if (!sessionStorage.getItem("membersClaimsSessionToken") || !["membership_specialist", "branch_manager", "verifier", "processor"].includes(localStorage.getItem("role"))) {
   window.location.href = "login.html";
 }
 </script>
@@ -297,6 +297,16 @@ if (!["membership_specialist", "branch_manager", "verifier", "processor"].includ
             <option value="hospitalization">Hospitalization Claims</option>
             <option value="karamay">Karamay Claims</option>
           </select>
+        </div>
+        <div class="form-group report-date-field">
+          <label for="claimsReportDateFrom">Date From</label>
+          <input id="claimsReportDateFrom" class="form-control" type="date"
+            onchange="resetClaimsSummaryResults()">
+        </div>
+        <div class="form-group report-date-field">
+          <label for="claimsReportDateTo">Date To</label>
+          <input id="claimsReportDateTo" class="form-control" type="date"
+            onchange="resetClaimsSummaryResults()">
         </div>
         <div id="karamayReleaseModeGroup" class="form-group" style="display: none;">
           <label for="karamayReportReleaseMode">Mode of Release</label>

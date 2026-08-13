@@ -801,6 +801,10 @@ tbody tr:last-child td {
   margin: 0;
 }
 
+.report-form .report-date-field {
+  flex: 0 1 180px;
+}
+
 .report-grand-total {
   font-weight: 700;
 }
