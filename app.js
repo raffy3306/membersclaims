@@ -3095,7 +3095,9 @@ function getWorkflowQueueStatus(role = getCurrentRole()) {
 function userCanViewBranchRequest(request, role = getCurrentRole(), branchId = localStorage.getItem("branchid")) {
   const normalizedRole = normalizeRole(role);
   if (normalizedRole === "branch_manager") return requestBelongsToBranch(request, branchId);
-  if (normalizedRole === "membership_specialist") return !normalizeValue(branchId) || requestBelongsToBranch(request, branchId);
+  // MRDS has global claim access on the server and must be able to review
+  // Under Verification requests from every branch.
+  if (normalizedRole === "membership_specialist") return true;
   return true;
 }
 
