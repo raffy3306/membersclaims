@@ -6,6 +6,67 @@ const SESSION_TOKEN_KEY = "membersClaimsSessionToken";
 const SESSION_EXPIRY_KEY = "membersClaimsSessionExpiresAt";
 const BROWSER_FETCH = window.fetch.bind(window);
 
+let activeDataLoads = 0;
+let dataLoadingShowTimer = null;
+let dataLoadingHideTimer = null;
+let dataLoadingShownAt = 0;
+
+function isDataRetrievalAction(action) {
+  return String(action || "").trim().startsWith("get");
+}
+
+function getDataLoadingIndicator() {
+  let indicator = document.getElementById("globalDataLoadingIndicator");
+  if (indicator || !document.body) return indicator;
+
+  indicator = document.createElement("div");
+  indicator.id = "globalDataLoadingIndicator";
+  indicator.className = "global-data-loading";
+  indicator.setAttribute("role", "status");
+  indicator.setAttribute("aria-live", "polite");
+  indicator.setAttribute("aria-hidden", "true");
+  indicator.innerHTML = `
+    <div class="global-data-loading-card">
+      <span class="global-data-loading-spinner" aria-hidden="true"></span>
+      <span>Retrieving data...</span>
+    </div>
+  `;
+  document.body.appendChild(indicator);
+  return indicator;
+}
+
+function beginDataLoading() {
+  activeDataLoads++;
+  clearTimeout(dataLoadingHideTimer);
+  if (activeDataLoads !== 1) return;
+
+  clearTimeout(dataLoadingShowTimer);
+  dataLoadingShowTimer = setTimeout(() => {
+    if (activeDataLoads < 1) return;
+    const indicator = getDataLoadingIndicator();
+    if (!indicator) return;
+    dataLoadingShownAt = Date.now();
+    indicator.classList.add("visible");
+    indicator.setAttribute("aria-hidden", "false");
+  }, 120);
+}
+
+function endDataLoading() {
+  activeDataLoads = Math.max(0, activeDataLoads - 1);
+  if (activeDataLoads > 0) return;
+
+  clearTimeout(dataLoadingShowTimer);
+  const indicator = document.getElementById("globalDataLoadingIndicator");
+  if (!indicator) return;
+
+  const remainingVisibleTime = Math.max(0, 300 - (Date.now() - dataLoadingShownAt));
+  dataLoadingHideTimer = setTimeout(() => {
+    if (activeDataLoads > 0) return;
+    indicator.classList.remove("visible");
+    indicator.setAttribute("aria-hidden", "true");
+  }, remainingVisibleTime);
+}
+
 function getSessionToken() {
   const expiresAt = Number(sessionStorage.getItem(SESSION_EXPIRY_KEY) || 0);
   if (expiresAt && expiresAt <= Date.now()) {
@@ -54,14 +115,23 @@ async function apiFetch(input, init = {}) {
   if (!url.startsWith(API)) return BROWSER_FETCH(input, init);
 
   const options = { ...init };
+  let payload = null;
   if (typeof options.body === "string") {
     try {
-      options.body = JSON.stringify(withSessionToken(JSON.parse(options.body)));
+      payload = JSON.parse(options.body);
+      options.body = JSON.stringify(withSessionToken(payload));
     } catch (err) {
       // Non-JSON bodies are left unchanged.
     }
   }
-  return BROWSER_FETCH(input, options);
+
+  const showLoading = isDataRetrievalAction(payload?.action);
+  if (showLoading) beginDataLoading();
+  try {
+    return await BROWSER_FETCH(input, options);
+  } finally {
+    if (showLoading) endDataLoading();
+  }
 }
 
 // Route all existing API fetches through the session-token injector. This keeps
@@ -248,6 +318,9 @@ function getFetchUrl(input) {
 }
 
 function callAppsScriptJsonp(payload, timeoutMs = 30000) {
+  const showLoading = isDataRetrievalAction(payload?.action);
+  if (showLoading) beginDataLoading();
+
   return new Promise((resolve, reject) => {
     const callbackName = `appsScriptCallback_${Date.now()}_${Math.random().toString(36).slice(2)}`;
     const script = document.createElement("script");
@@ -298,6 +371,8 @@ function callAppsScriptJsonp(payload, timeoutMs = 30000) {
     url.searchParams.set("callback", callbackName);
     script.src = url.toString();
     document.body.appendChild(script);
+  }).finally(() => {
+    if (showLoading) endDataLoading();
   });
 }
 
