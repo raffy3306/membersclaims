@@ -1132,6 +1132,62 @@ tbody tr:last-child td {
 }
 
 /* UTILITY */
+.global-data-loading {
+  position: fixed;
+  inset: 0;
+  z-index: 10000;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  background: rgba(15, 23, 42, 0.18);
+  opacity: 0;
+  visibility: hidden;
+  pointer-events: none;
+  transition: opacity 160ms ease, visibility 160ms ease;
+}
+
+.global-data-loading.visible {
+  opacity: 1;
+  visibility: visible;
+  pointer-events: auto;
+}
+
+.global-data-loading-card {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  padding: 14px 18px;
+  border: 1px solid rgba(148, 163, 184, 0.28);
+  border-radius: 12px;
+  background: rgba(255, 255, 255, 0.97);
+  box-shadow: 0 14px 38px rgba(15, 23, 42, 0.2);
+  color: #1f2937;
+  font-size: 14px;
+  font-weight: 600;
+}
+
+.global-data-loading-spinner {
+  width: 22px;
+  height: 22px;
+  box-sizing: border-box;
+  border: 3px solid #dbeafe;
+  border-top-color: #2563eb;
+  border-radius: 50%;
+  animation: global-data-loading-spin 700ms linear infinite;
+}
+
+@keyframes global-data-loading-spin {
+  to { transform: rotate(360deg); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .global-data-loading,
+  .global-data-loading-spinner {
+    transition: none;
+    animation-duration: 1400ms;
+  }
+}
+
 .signature-upload-row {
   display: flex;
   align-items: center;
