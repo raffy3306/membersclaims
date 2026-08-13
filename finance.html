@@ -15,7 +15,7 @@ const financeStoredRole = String(localStorage.getItem("role") || "").trim().toLo
 const financeRoleKey = financeStoredRole.replace(/[^a-z0-9]/g, "");
 const financeRole = financeRoleAliases[financeStoredRole] || financeRoleAliases[financeRoleKey] || financeStoredRole;
 
-if (financeRole !== "finance_head") {
+if (!sessionStorage.getItem("membersClaimsSessionToken") || financeRole !== "finance_head") {
   window.location.href = "login.html";
 }
 </script>

@@ -188,6 +188,7 @@ create table if not exists public.karamayclaims (
   member_branch_id text not null,
   member_address text not null,
   date_of_death date not null,
+  interment_date date not null,
   beneficiary_name text not null,
   relationship text not null,
   beneficiary_address text not null,
@@ -211,6 +212,7 @@ alter table public.karamayclaims add column if not exists member_name text;
 alter table public.karamayclaims add column if not exists member_branch_id text;
 alter table public.karamayclaims add column if not exists member_address text;
 alter table public.karamayclaims add column if not exists date_of_death date;
+alter table public.karamayclaims add column if not exists interment_date date;
 alter table public.karamayclaims add column if not exists beneficiary_name text;
 alter table public.karamayclaims add column if not exists relationship text;
 alter table public.karamayclaims add column if not exists beneficiary_address text;

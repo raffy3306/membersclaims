@@ -2,7 +2,7 @@
 <html>
 
 <script>
-if (localStorage.getItem("role") !== "admin") {
+if (!sessionStorage.getItem("membersClaimsSessionToken") || localStorage.getItem("role") !== "admin") {
   window.location.href = "login.html";
 }
 </script>

@@ -61,7 +61,8 @@ const KARAMAY_CLAIM_HEADERS = [
   "SavingsCreditApprovedBy",
   "Notes",
   "Attachments",
-  "MembershipSpecialistVerifiedBy"
+  "MembershipSpecialistVerifiedBy",
+  "IntermentDate"
 ];
 
 const KARAMAY_ATTACHMENT_DATA_HEADERS = [
@@ -127,6 +128,54 @@ const MIN_ELIGIBLE_CONFINEMENT_DAYS = 3;
 const MAX_CLAIMS_PER_YEAR = 2;
 const YEARLY_CLAIM_COUNT_STATUSES = ["Pending", "Under Verification", "Under Review", "Forwarded", "Approved", "Returned"];
 
+// Security settings. Sessions and the password pepper are stored in Script
+// Properties, never in the spreadsheet or browser-visible source.
+const SESSION_TTL_MS = 8 * 60 * 60 * 1000;
+const SESSION_PROPERTY_PREFIX = "mc_session_";
+const PASSWORD_RESET_PROPERTY_PREFIX = "mc_password_reset_";
+const PASSWORD_RESET_TTL_MS = 30 * 60 * 1000;
+// Apps Script Utilities calls are considerably slower than native server
+// crypto. The secret Script-Properties pepper and per-password random salt
+// provide the primary protection; 1,000 PBKDF2 rounds keep login executions
+// within the web-app response window.
+const PASSWORD_HASH_ITERATIONS = 1000;
+const PASSWORD_HASH_PREFIX = "pbkdf2_sha256";
+const LOGIN_FAILURE_LIMIT = 10;
+const LOGIN_FAILURE_TTL_SECONDS = 15 * 60;
+const PASSWORD_RESET_LIMIT = 3;
+const PASSWORD_RESET_RATE_TTL_SECONDS = 60 * 60;
+
+const ACTION_ROLES = {
+  changePassword: ["admin", "crs", "branch_manager", "membership_specialist", "finance_head", "savings_credit_head"],
+  logout: ["admin", "crs", "branch_manager", "membership_specialist", "finance_head", "savings_credit_head"],
+  getRequests: ["admin", "crs", "branch_manager", "membership_specialist", "finance_head", "savings_credit_head"],
+  getRequestAttachments: ["admin", "crs", "branch_manager", "membership_specialist", "finance_head", "savings_credit_head"],
+  createRequest: ["crs"],
+  editRequest: ["crs"],
+  updateStatus: ["branch_manager", "membership_specialist", "finance_head", "savings_credit_head"],
+  getKaramayClaims: ["admin", "crs", "branch_manager", "membership_specialist", "savings_credit_head"],
+  getKaramayClaimAttachments: ["admin", "crs", "branch_manager", "membership_specialist", "savings_credit_head"],
+  createKaramayClaim: ["crs"],
+  editKaramayClaim: ["crs"],
+  getDashboardCounts: ["admin", "crs", "branch_manager", "membership_specialist", "finance_head", "savings_credit_head"],
+  getClaimsSummaryReport: ["admin", "membership_specialist"],
+  getSettings: ["admin", "crs", "branch_manager", "membership_specialist", "finance_head", "savings_credit_head"],
+  saveSettings: ["admin"],
+  saveSignature: ["crs", "branch_manager", "membership_specialist", "finance_head", "savings_credit_head"],
+  getUsers: ["admin"],
+  createUser: ["admin"],
+  updateUser: ["admin"],
+  getMembers: ["admin", "crs", "membership_specialist"],
+  saveMember: ["admin", "membership_specialist"],
+  setMemberStatus: ["admin", "membership_specialist"],
+  importMembers: ["admin", "membership_specialist"],
+  getBranches: ["admin", "crs", "branch_manager", "membership_specialist", "finance_head", "savings_credit_head"],
+  getHospitals: ["admin", "crs", "branch_manager", "membership_specialist", "finance_head", "savings_credit_head"],
+  getHospitalDiagnostics: ["admin"],
+  getSegmentationRates: ["admin", "crs", "branch_manager", "membership_specialist", "finance_head", "savings_credit_head"],
+  getTellerReferenceData: ["crs"]
+};
+
 const ROLE_ALIASES = {
   encoder: "crs",
   teller: "crs",
@@ -150,6 +199,53 @@ function normalizeHeaderName(value) {
 
 function normalizeValue(value) {
   return String(value == null ? "" : value).trim();
+}
+
+function isActiveRecordStatus(value) {
+  const status = normalizeHeaderName(value);
+  return status === "active" ||
+    status === "activemember" ||
+    status.indexOf("activegoodstanding") === 0 ||
+    status === "yes" ||
+    status === "true" ||
+    status === "1";
+}
+
+function isInactiveRecordStatus(value) {
+  const status = normalizeHeaderName(value);
+  return status === "inactive" ||
+    status === "inactivemember" ||
+    status === "disabled" ||
+    status === "no" ||
+    status === "false" ||
+    status === "0";
+}
+
+function getMemberStatusInfo(meta, row) {
+  const membershipStatus = getFirstPresentCell(meta, row, [
+    "MembershipStatus",
+    "Membership Status",
+    "MemberStatus",
+    "Member Status"
+  ], -1, "");
+  const enabledStatus = getFirstPresentCell(meta, row, [
+    "Status",
+    "IsActive",
+    "Is Active",
+    "Enabled"
+  ], -1, "");
+
+  // When both fields exist, either explicit inactive/false value disables the
+  // record. Otherwise ACTIVE membership or TRUE status makes it eligible.
+  const active = !isInactiveRecordStatus(membershipStatus) &&
+    !isInactiveRecordStatus(enabledStatus) &&
+    (isActiveRecordStatus(membershipStatus) || isActiveRecordStatus(enabledStatus));
+
+  return {
+    active: active,
+    membershipStatus: normalizeValue(membershipStatus),
+    enabledStatus: normalizeValue(enabledStatus)
+  };
 }
 
 function normalizeEmail(email) {
@@ -387,6 +483,21 @@ function getCell(meta, row, candidates, fallbackIndex, defaultValue) {
     return defaultValue == null ? "" : defaultValue;
   }
   return row[index];
+}
+
+function getFirstPresentCell(meta, row, candidates, fallbackIndex, defaultValue) {
+  for (let i = 0; i < candidates.length; i++) {
+    const target = normalizeHeaderName(candidates[i]);
+    for (let column = 0; column < meta.headers.length; column++) {
+      if (normalizeHeaderName(meta.headers[column]) !== target) continue;
+      const value = column < row.length ? row[column] : "";
+      if (normalizeValue(value) !== "") return value;
+    }
+  }
+  const fallback = fallbackIndex == null || fallbackIndex < 0 || fallbackIndex >= row.length
+    ? ""
+    : row[fallbackIndex];
+  return normalizeValue(fallback) !== "" ? fallback : (defaultValue == null ? "" : defaultValue);
 }
 
 function setObjectFields(sheet, rowNumber, meta, valuesByHeader) {
@@ -663,14 +774,18 @@ function claimRowToLegacy(meta, row, includeAttachments) {
   ];
 }
 
-function getRequests(includeAttachments) {
+function getRequests(data) {
   try {
+    const includeAttachments = !data || data.includeAttachments !== false;
+    const user = data && data.authUser;
     const meta = getSheetMetadata(SHEETS.claims, CLAIM_HEADERS);
     const rows = [CLAIM_HEADERS];
 
     for (let i = 1; i < meta.rows.length; i++) {
       const claimId = getCell(meta, meta.rows[i], ["ClaimID", "Claim ID", "ID", "RequestID"], 0, "");
       if (!claimId) continue;
+      const branchId = getCell(meta, meta.rows[i], ["BranchId", "Branch ID", "Branch"], 13, "");
+      if (!canAccessBranch(user, branchId)) continue;
       rows.push(claimRowToLegacy(meta, meta.rows[i], includeAttachments));
     }
 
@@ -704,12 +819,16 @@ function karamayClaimRowToLegacy(meta, row, attachmentDataMeta, includeAttachmen
       : hydrateKaramayAttachments(
           parseAttachments(getCell(meta, row, ["Attachments"], 16, "")),
           attachmentDataMeta
-        )
+        ),
+    getCell(meta, row, ["MembershipSpecialistVerifiedBy", "Membership Specialist Verified By"], 17, ""),
+    formatDateOnly(getCell(meta, row, ["IntermentDate", "Interment Date"], 18, ""))
   ];
 }
 
-function getKaramayClaims(includeAttachments) {
+function getKaramayClaims(data) {
   try {
+    const includeAttachments = !data || data.includeAttachments !== false;
+    const user = data && data.authUser;
     const meta = getSheetMetadata(SHEETS.karamayClaims, KARAMAY_CLAIM_HEADERS);
     const attachmentDataMeta = includeAttachments === false ? null : getKaramayAttachmentDataMeta();
     const rows = [KARAMAY_CLAIM_HEADERS];
@@ -717,6 +836,8 @@ function getKaramayClaims(includeAttachments) {
     for (let i = 1; i < meta.rows.length; i++) {
       const claimId = getCell(meta, meta.rows[i], ["ClaimID", "Claim ID", "ID", "RequestID"], 0, "");
       if (!claimId) continue;
+      const branchId = getCell(meta, meta.rows[i], ["MemberBranchId", "Member Branch ID", "BranchId", "Branch ID"], 2, "");
+      if (!canAccessBranch(user, branchId)) continue;
       rows.push(karamayClaimRowToLegacy(meta, meta.rows[i], attachmentDataMeta, includeAttachments));
     }
 
@@ -727,11 +848,13 @@ function getKaramayClaims(includeAttachments) {
   }
 }
 
-function getRequestAttachments(requestId) {
+function getRequestAttachments(requestId, user) {
   try {
     const meta = getSheetMetadata(SHEETS.claims, CLAIM_HEADERS);
     const found = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, requestId);
     if (!found) return { success: false, message: "Claim not found." };
+    const branchId = getCell(meta, found.row, ["BranchId", "Branch ID", "Branch"], 13, "");
+    if (!canAccessBranch(user, branchId)) return { success: false, code: "FORBIDDEN", message: "You cannot access this claim." };
 
     return {
       success: true,
@@ -743,11 +866,13 @@ function getRequestAttachments(requestId) {
   }
 }
 
-function getKaramayClaimAttachments(requestId) {
+function getKaramayClaimAttachments(requestId, user) {
   try {
     const meta = getSheetMetadata(SHEETS.karamayClaims, KARAMAY_CLAIM_HEADERS);
     const found = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, requestId);
     if (!found) return { success: false, message: "Karamay claim not found." };
+    const branchId = getCell(meta, found.row, ["MemberBranchId", "Member Branch ID", "BranchId", "Branch ID"], 2, "");
+    if (!canAccessBranch(user, branchId)) return { success: false, code: "FORBIDDEN", message: "You cannot access this claim." };
 
     return {
       success: true,
@@ -764,6 +889,9 @@ function getKaramayClaimAttachments(requestId) {
 
 function createKaramayClaim(data) {
   try {
+    if (!normalizeValue(data.branchid)) {
+      return { success: false, message: "Your account does not have an assigned branch." };
+    }
     return withScriptLock(function() {
       const meta = getSheetMetadata(SHEETS.karamayClaims, KARAMAY_CLAIM_HEADERS);
       const claimId = data.request_id || "KRM-" + new Date().getTime();
@@ -777,7 +905,7 @@ function createKaramayClaim(data) {
         return { success: true, request_id: claimId, claimID: claimId, duplicate: true };
       }
 
-      if (!data.memberName || !branchId || !data.memberAddress || !data.dateOfDeath) {
+      if (!data.memberName || !branchId || !data.memberAddress || !data.dateOfDeath || !data.intermentDate) {
         return { success: false, message: "Please complete the deceased member information." };
       }
 
@@ -797,6 +925,7 @@ function createKaramayClaim(data) {
         MemberBranchId: branchId,
         MemberAddress: data.memberAddress || "",
         DateOfDeath: data.dateOfDeath || "",
+        IntermentDate: data.intermentDate || "",
         BeneficiaryName: data.beneficiaryName || "",
         Relationship: data.relationship || "",
         BeneficiaryAddress: data.beneficiaryAddress || "",
@@ -830,6 +959,11 @@ function editKaramayClaim(data) {
       if (!found) {
         Logger.log('editKaramayClaim: claim not found request_id=%s', String(data.request_id));
         return { success: false, message: "Claim not found." };
+      }
+
+      const existingBranchId = getCell(meta, found.row, ["MemberBranchId", "Member Branch ID", "BranchId", "Branch ID"], 2, "");
+      if (!canAccessBranch(data.authUser, existingBranchId)) {
+        return { success: false, code: "FORBIDDEN", message: "You cannot edit a claim from another branch." };
       }
 
       const statusHeaderIndex = getHeaderIndex(meta, ["Status", "ClaimStatus", "Claim Status"], 10);
@@ -868,7 +1002,7 @@ function editKaramayClaim(data) {
       const modeOfRelease = firstPresent(data.modeOfRelease, data.mode_of_release, data.ModeOfRelease, "Actual Delivery (Bouquet and Cash)");
       const actor = firstPresent(data.tellerName, data.tellerEmail);
 
-      if (!data.memberName || !branchId || !data.memberAddress || !data.dateOfDeath) {
+      if (!data.memberName || !branchId || !data.memberAddress || !data.dateOfDeath || !data.intermentDate) {
         return { success: false, message: "Please complete the deceased member information." };
       }
 
@@ -887,6 +1021,7 @@ function editKaramayClaim(data) {
         MemberBranchId: branchId,
         MemberAddress: data.memberAddress || "",
         DateOfDeath: data.dateOfDeath || "",
+        IntermentDate: data.intermentDate || "",
         BeneficiaryName: data.beneficiaryName || "",
         Relationship: data.relationship || "",
         BeneficiaryAddress: data.beneficiaryAddress || "",
@@ -912,28 +1047,35 @@ function editKaramayClaim(data) {
 
 function createRequest(data) {
   try {
+    if (!normalizeValue(data.branchid)) {
+      return { success: false, message: "Your account does not have an assigned branch." };
+    }
     return withScriptLock(function() {
       const meta = getSheetMetadata(SHEETS.claims, CLAIM_HEADERS);
+      const references = getTrustedHospitalizationReferences(data);
+      if (!references.success) return references;
+      const member = references.member;
+      const hospital = references.hospital;
       const dates = calculateHospitalDays(data.dateAdmitted, data.dateDischarged);
-      const daysComputed = toNumber(firstPresent(data.daysComputed, data.daysConfined, dates.payableDays), 0);
-      const actualDaysConfined = toNumber(firstPresent(data.actualDaysConfined, dates.actualDays), 0);
-      const dailyRate = toNumber(data.dailyRate, 0);
-      const claimableAmount = toNumber(firstPresent(data.claimableAmount, daysComputed * dailyRate), 0);
+      const daysComputed = dates.payableDays;
+      const actualDaysConfined = dates.actualDays;
+      const dailyRate = references.dailyRate;
+      const claimableAmount = daysComputed * dailyRate;
       const claimId = data.request_id || generateID();
       const actor = firstPresent(data.tellerName, data.tellerEmail);
-      const branch = firstPresent(data.branch, data.tellerBranchId, data.branchid);
-      const branchName = firstPresent(data.branchName, getBranchMap()[normalizeValue(branch)], branch);
+      const branch = member.branch;
+      const branchName = firstPresent(getBranchMap()[normalizeValue(branch)], branch);
       const existingClaim = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, claimId);
 
       if (existingClaim) {
         return { success: true, request_id: claimId, claimID: claimId, duplicate: true };
       }
 
-      if (!data.memberID || !data.memberName) {
+      if (!member.id || !member.name) {
         return { success: false, message: "Please select a member from the member list." };
       }
 
-      if (!data.hospitalID || !data.hospitalName) {
+      if (!hospital.id || !hospital.name) {
         return { success: false, message: "Please select the hospital where the member was confined." };
       }
 
@@ -956,26 +1098,26 @@ function createRequest(data) {
 
       appendObjectRow(meta.sheet, meta, {
         ClaimID: claimId,
-        MemberName: data.memberName || "",
-        Gender: data.gender || "",
+        MemberName: member.name,
+        Gender: member.gender,
         DaysComputed: daysComputed,
         DailyRate: dailyRate,
         ClaimableAmount: claimableAmount,
-        Hospital: data.hospitalName || "",
+        Hospital: hospital.name,
         Status: "Pending",
         EncodedBy: actor,
         VerifiedBy: "",
         ApprovedBy: "",
         DateStamp: new Date(),
-        ContactNumber: data.contactNumber || "",
+        ContactNumber: member.contactNumber,
         BranchId: branch,
         Notes: "",
         FinanceCheckedBy: "",
         Attachments: JSON.stringify(data.attachments || []),
-        MemberID: data.memberID || "",
-        Segmentation: data.segmentation || "",
+        MemberID: member.id,
+        Segmentation: member.segmentation,
         Branch: branchName,
-        HospitalID: data.hospitalID || "",
+        HospitalID: hospital.id,
         DateAdmitted: data.dateAdmitted || "",
         DateDischarged: data.dateDischarged || "",
         ActualDaysConfined: actualDaysConfined,
@@ -999,20 +1141,29 @@ function editRequest(data) {
         return { success: false, message: "Claim not found." };
       }
 
+      const existingBranchId = getCell(meta, found.row, ["BranchId", "Branch ID", "Branch"], 13, "");
+      if (!canAccessBranch(data.authUser, existingBranchId)) {
+        return { success: false, code: "FORBIDDEN", message: "You cannot edit a claim from another branch." };
+      }
+
       const currentStatus = normalizeValue(getCell(meta, found.row, ["Status", "ClaimStatus", "Claim Status"], 7, "")).toLowerCase();
       const isReturned = currentStatus.includes("return");
       if (!isReturned) {
         return { success: false, message: "Only returned claims can be edited." };
       }
 
+      const references = getTrustedHospitalizationReferences(data);
+      if (!references.success) return references;
+      const member = references.member;
+      const hospital = references.hospital;
       const dates = calculateHospitalDays(data.dateAdmitted, data.dateDischarged);
-      const daysComputed = toNumber(firstPresent(data.daysComputed, data.daysConfined, dates.payableDays), 0);
-      const actualDaysConfined = toNumber(firstPresent(data.actualDaysConfined, dates.actualDays), 0);
-      const dailyRate = toNumber(data.dailyRate, 0);
-      const claimableAmount = toNumber(firstPresent(data.claimableAmount, daysComputed * dailyRate), 0);
+      const daysComputed = dates.payableDays;
+      const actualDaysConfined = dates.actualDays;
+      const dailyRate = references.dailyRate;
+      const claimableAmount = daysComputed * dailyRate;
       const actor = firstPresent(data.tellerName, data.tellerEmail);
-      const branch = firstPresent(data.branch, data.tellerBranchId, data.branchid);
-      const branchName = firstPresent(data.branchName, getBranchMap()[normalizeValue(branch)], branch);
+      const branch = member.branch;
+      const branchName = firstPresent(getBranchMap()[normalizeValue(branch)], branch);
 
       if (!data.dateAdmitted || !data.dateDischarged || actualDaysConfined <= 0) {
         return { success: false, message: "Please enter valid admitted and discharged dates." };
@@ -1032,24 +1183,24 @@ function editRequest(data) {
       }
 
       const updates = {
-        MemberName: data.memberName || "",
-        Gender: data.gender || "",
+        MemberName: member.name,
+        Gender: member.gender,
         DaysComputed: daysComputed,
         DailyRate: dailyRate,
         ClaimableAmount: claimableAmount,
-        Hospital: data.hospitalName || "",
+        Hospital: hospital.name,
         Status: "Pending",
         EncodedBy: actor,
         VerifiedBy: "",
         ApprovedBy: "",
-        ContactNumber: data.contactNumber || "",
+        ContactNumber: member.contactNumber,
         BranchId: branch,
         Notes: "",
         FinanceCheckedBy: "",
-        MemberID: data.memberID || "",
-        Segmentation: data.segmentation || "",
+        MemberID: member.id,
+        Segmentation: member.segmentation,
         Branch: branchName,
-        HospitalID: data.hospitalID || "",
+        HospitalID: hospital.id,
         DateAdmitted: data.dateAdmitted || "",
         DateDischarged: data.dateDischarged || "",
         ActualDaysConfined: actualDaysConfined,
@@ -1070,8 +1221,6 @@ function editRequest(data) {
 
 function updateStatus(data) {
   try {
-    console.log("updateStatus called with data:", data);
-    
     return withScriptLock(function() {
       const role = normalizeRole(data.role);
       const isKaramayClaim = String(data.request_id || "").startsWith("KRM");
@@ -1085,6 +1234,13 @@ function updateStatus(data) {
 
       if (!found) {
         return { success: false, message: "Claim not found." };
+      }
+
+      const claimBranchId = isKaramayClaim
+        ? getCell(meta, found.row, ["MemberBranchId", "Member Branch ID", "BranchId", "Branch ID"], 2, "")
+        : getCell(meta, found.row, ["BranchId", "Branch ID", "Branch"], 13, "");
+      if (!canAccessBranch(data.authUser, claimBranchId)) {
+        return { success: false, code: "FORBIDDEN", message: "You cannot update a claim from another branch." };
       }
 
       const updates = {
@@ -1123,6 +1279,20 @@ function updateStatus(data) {
           updates.Notes = data.notes || "";
         }
       } else {
+        const currentStatus = String(getCell(meta, found.row, ["Status", "ClaimStatus", "Claim Status"], 7, "")).trim();
+        const allowedTransitions = {
+          branch_manager: { Pending: ["Under Verification", "Returned"] },
+          membership_specialist: { "Under Verification": ["Under Review", "Pending"] },
+          finance_head: { "Under Review": ["Forwarded", "Under Verification"] },
+          savings_credit_head: { Forwarded: ["Approved", "Rejected", "Under Review"] }
+        };
+        const allowedStatuses = allowedTransitions[role] && allowedTransitions[role][currentStatus]
+          ? allowedTransitions[role][currentStatus]
+          : [];
+        if (allowedStatuses.indexOf(data.status) === -1) {
+          return { success: false, message: "This claim cannot move from " + (currentStatus || "its current status") + " to " + (data.status || "the requested status") + " for your role." };
+        }
+
         if (role === "branch_manager") {
           updates.VerifiedBy = firstPresent(data.branchManagerName, data.branchManagerEmail);
         }
@@ -1157,8 +1327,9 @@ function updateStatus(data) {
   }
 }
 
-function getDashboardCounts() {
-  const rows = getRequests(false);
+function getDashboardCounts(data) {
+  const requestData = applyTrustedIdentity({ includeAttachments: false }, data.authUser);
+  const rows = getRequests(requestData);
   let awaiting = 0;
   let approved = 0;
   let rejected = 0;
@@ -1187,57 +1358,290 @@ function getDashboardCounts() {
 
 function login(email, password) {
   try {
-    const meta = getSheetMetadata(SHEETS.users, USER_HEADERS);
     const normalizedEmail = normalizeEmail(email);
-    const normalizedPassword = normalizeValue(password);
+    const suppliedPassword = String(password == null ? "" : password);
 
-    const sheetName = meta && meta.sheet ? meta.sheet.getName() : SHEETS.users;
-    const rowCount = meta && Array.isArray(meta.rows) ? meta.rows.length : 0;
-    const headerRow = meta && Array.isArray(meta.headers) ? meta.headers.join(" | ") : "";
-
-    for (let i = 1; i < meta.rows.length; i++) {
-      const row = meta.rows[i];
-      const rowEmail = normalizeEmail(getCell(meta, row, ["Email", "User", "Username"], 0, ""));
-      const rowPassword = normalizeValue(getCell(meta, row, ["Password"], 1, ""));
-
-      if (rowEmail === normalizedEmail && rowPassword === normalizedPassword) {
-        const role = normalizeRole(getCell(meta, row, ["Role"], 2, ""));
-        const firstLogin = normalizeFlag(getCell(meta, row, ["FirstLogin", "First Login"], 6, false));
-        const mustChangePassword = normalizeFlag(getCell(meta, row, ["MustChangePassword", "Must Change Password"], 7, firstLogin));
-
-        return {
-          success: true,
-          role: role,
-          user: rowEmail,
-          branchid: getCell(meta, row, ["BranchId", "Branch ID"], 5, ""),
-          fullname: getCell(meta, row, ["Fullname", "Full Name", "Name"], 3, ""),
-          position: getCell(meta, row, ["Position"], 4, ""),
-          mustChangePassword: firstLogin || mustChangePassword
-        };
-      }
+    if (!normalizedEmail || !suppliedPassword || isLoginRateLimited(normalizedEmail)) {
+      return { success: false, message: "Invalid email or password. Please wait and try again if there have been repeated attempts." };
     }
 
+    let user = getUserRecordByEmail(normalizedEmail);
+    const pendingReset = user ? getPendingPasswordReset(normalizedEmail) : null;
+    const resetPasswordValid = Boolean(pendingReset && verifyPassword(suppliedPassword, pendingReset.passwordHash));
+    // Check a temporary reset first so it can recover an account that contains
+    // an older, excessively expensive password hash.
+    const passwordValid = Boolean(user && !resetPasswordValid && verifyPassword(suppliedPassword, user.password));
+    if (!user || (!passwordValid && !resetPasswordValid)) {
+      recordLoginFailure(normalizedEmail);
+      return { success: false, message: "Invalid email or password." };
+    }
+
+    clearLoginFailures(normalizedEmail);
+    if (resetPasswordValid && !passwordValid) {
+      setObjectFields(user.meta.sheet, user.rowNumber, user.meta, {
+        Password: pendingReset.passwordHash,
+        FirstLogin: true,
+        MustChangePassword: true
+      });
+      revokeSessionsForEmail(normalizedEmail);
+      clearPendingPasswordReset(normalizedEmail);
+      user = getUserRecordByEmail(normalizedEmail);
+    } else if (
+      user.password.indexOf(PASSWORD_HASH_PREFIX + "$") !== 0 ||
+      Number(user.password.split("$")[1]) !== PASSWORD_HASH_ITERATIONS
+    ) {
+      setObjectFields(user.meta.sheet, user.rowNumber, user.meta, { Password: hashPassword(suppliedPassword) });
+      clearPendingPasswordReset(normalizedEmail);
+    } else {
+      clearPendingPasswordReset(normalizedEmail);
+    }
+
+    const session = createSession(user);
     return {
-      success: false,
-      message: "Invalid email or password.",
-      debug: {
-        sheetName: sheetName,
-        rowCount: rowCount,
-        headers: headerRow,
-        searchedEmail: normalizedEmail
-      }
+      success: true,
+      role: user.role,
+      user: user.email,
+      branchid: user.branchid,
+      fullname: user.fullname,
+      position: user.position,
+      mustChangePassword: user.mustChangePassword,
+      sessionToken: session.token,
+      sessionExpiresAt: session.expiresAt
     };
   } catch (err) {
-    return { success: false, message: "Login error: " + err.toString() };
+    console.error("login error", err);
+    return { success: false, message: "Unable to sign in. Please try again." };
   }
+}
+
+function getSheetMetadataExcludingHeaders(sheetName, requiredHeaders, excludedHeaders) {
+  const sheet = getSheet(sheetName, requiredHeaders || []);
+  const lastRow = sheet.getLastRow();
+  const lastColumn = Math.max(sheet.getLastColumn(), 1);
+  const headers = lastRow > 0
+    ? sheet.getRange(1, 1, 1, lastColumn).getValues()[0].map(function(header) { return normalizeValue(header); })
+    : [];
+  const excluded = {};
+  (excludedHeaders || []).forEach(function(header) { excluded[normalizeHeaderName(header)] = true; });
+
+  const rows = Array.from({ length: lastRow }, function() {
+    return Array(lastColumn).fill("");
+  });
+  if (lastRow > 0) rows[0] = headers.slice();
+
+  let start = -1;
+  for (let column = 0; column <= lastColumn; column++) {
+    const isReadable = column < lastColumn && !excluded[normalizeHeaderName(headers[column])];
+    if (isReadable && start < 0) start = column;
+    if ((!isReadable || column === lastColumn) && start >= 0) {
+      const width = column - start;
+      const values = sheet.getRange(1, start + 1, lastRow, width).getValues();
+      for (let rowIndex = 0; rowIndex < values.length; rowIndex++) {
+        for (let offset = 0; offset < width; offset++) {
+          rows[rowIndex][start + offset] = values[rowIndex][offset];
+        }
+      }
+      start = -1;
+    }
+  }
+
+  const headerLookup = {};
+  headers.forEach(function(header, index) {
+    const key = normalizeHeaderName(header);
+    if (key && headerLookup[key] === undefined) headerLookup[key] = index;
+  });
+  return { sheet: sheet, rows: rows, headers: headers, headerLookup: headerLookup };
+}
+
+function getReportDateKey(value) {
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return Utilities.formatDate(value, getTimeZone(), "yyyy-MM-dd");
+  }
+
+  const text = normalizeValue(value);
+  const isoMatch = text.match(/^(\d{4}-\d{2}-\d{2})/);
+  if (isoMatch) return isoMatch[1];
+  if (!text) return "";
+
+  const parsed = new Date(text);
+  return Number.isNaN(parsed.getTime())
+    ? ""
+    : Utilities.formatDate(parsed, getTimeZone(), "yyyy-MM-dd");
+}
+
+function isDateInReportRange(value, dateFrom, dateTo) {
+  const key = getReportDateKey(value);
+  return Boolean(key && key >= dateFrom && key <= dateTo);
+}
+
+function getClaimsSummaryReport(data) {
+  try {
+    const reportType = normalizeValue(data.reportType).toLowerCase();
+    const dateFrom = normalizeValue(data.dateFrom);
+    const dateTo = normalizeValue(data.dateTo);
+
+    if (["hospitalization", "karamay"].indexOf(reportType) === -1) {
+      return { success: false, message: "Please select a valid report type." };
+    }
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(dateFrom) || !/^\d{4}-\d{2}-\d{2}$/.test(dateTo)) {
+      return { success: false, message: "A valid Date From and Date To are required." };
+    }
+    if (dateFrom > dateTo) {
+      return { success: false, message: "Date From cannot be later than Date To." };
+    }
+
+    if (reportType === "hospitalization") {
+      const memberMeta = getSheetMetadata(SHEETS.members, MEMBER_HEADERS);
+      const membersById = {};
+      const membersByName = {};
+      for (let i = 1; i < memberMeta.rows.length; i++) {
+        const memberRow = memberMeta.rows[i];
+        const memberId = normalizeHeaderName(getCell(memberMeta, memberRow, ["MemberID", "Member ID", "MembershipID", "Membership ID"], 0, ""));
+        const memberName = normalizeValue(getCell(memberMeta, memberRow, ["FullName", "Full Name", "Name"], 1, ""));
+        const member = {
+          address: getFirstPresentCell(memberMeta, memberRow, [
+            "Address",
+            "MemberAddress",
+            "Member Address",
+            "HomeAddress",
+            "Home Address",
+            "ResidentialAddress",
+            "Residential Address",
+            "PermanentAddress",
+            "Permanent Address"
+          ], 2, ""),
+          branch: normalizeValue(getCell(memberMeta, memberRow, ["Branch", "BranchID", "Branch ID"], 4, "")),
+          segmentation: normalizeValue(getCell(memberMeta, memberRow, ["Segmentation"], 6, ""))
+        };
+        if (memberId) membersById[memberId] = member;
+        if (memberName) membersByName[normalizeHeaderName(memberName)] = member;
+      }
+
+      const branchMap = getBranchMap();
+      const meta = getSheetMetadata(SHEETS.claims, CLAIM_HEADERS);
+      const claims = [];
+      for (let i = 1; i < meta.rows.length; i++) {
+        const row = meta.rows[i];
+        if (normalizeValue(getCell(meta, row, ["Status", "ClaimStatus", "Claim Status"], 7, "")).toLowerCase() !== "approved") continue;
+        const dateStamp = getCell(meta, row, ["DateStamp", "Date Stamp", "DateFiled", "Date Filed", "CreatedAt"], 11, "");
+        if (!isDateInReportRange(dateStamp, dateFrom, dateTo)) continue;
+
+        const memberId = normalizeHeaderName(getCell(meta, row, ["MemberID", "Member ID", "MembershipID", "Membership ID"], 17, ""));
+        const memberName = normalizeValue(getCell(meta, row, ["MemberName", "Member Name", "FullName", "Full Name"], 1, ""));
+        const member = membersById[memberId] || membersByName[normalizeHeaderName(memberName)] || {};
+        const branchId = normalizeValue(firstPresent(
+          getCell(meta, row, ["BranchId", "Branch ID"], 13, ""),
+          member.branch
+        ));
+
+        claims.push({
+          claimId: getCell(meta, row, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, ""),
+          claimDate: getReportDateKey(dateStamp),
+          branchName: firstPresent(
+            getCell(meta, row, ["Branch"], 19, ""),
+            branchMap[branchId],
+            branchId
+          ),
+          memberName: memberName,
+          address: member.address || "",
+          segmentation: firstPresent(getCell(meta, row, ["Segmentation"], 18, ""), member.segmentation),
+          daysComputed: toNumber(getCell(meta, row, ["DaysComputed", "Days Computed"], 3, 0), 0),
+          amount: toNumber(getCell(meta, row, ["ClaimableAmount", "Claimable Amount"], 5, 0), 0)
+        });
+      }
+
+      claims.sort(function(a, b) { return b.claimDate.localeCompare(a.claimDate); });
+      return { success: true, reportType: reportType, dateFrom: dateFrom, dateTo: dateTo, claims: claims };
+    }
+
+    const branchMap = getBranchMap();
+    // Read every lightweight column by header, regardless of column order, but
+    // skip the attachment column that can make report generation time out.
+    const meta = getSheetMetadataExcludingHeaders(
+      SHEETS.karamayClaims,
+      KARAMAY_CLAIM_HEADERS,
+      ["Attachments", "Attachment"]
+    );
+    const claims = [];
+    for (let i = 1; i < meta.rows.length; i++) {
+      const row = meta.rows[i];
+      if (normalizeValue(getCell(meta, row, ["Status", "ClaimStatus", "Claim Status"], 10, "")).toLowerCase() !== "approved") continue;
+      const dateStamp = getCell(meta, row, ["DateStamp", "Date Stamp", "DateFiled", "Date Filed", "CreatedAt"], 12, "");
+      if (!isDateInReportRange(dateStamp, dateFrom, dateTo)) continue;
+      const branchId = normalizeValue(getCell(meta, row, ["MemberBranchId", "Member Branch ID", "BranchId", "Branch ID"], 2, ""));
+      claims.push({
+        claimId: getCell(meta, row, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, ""),
+        claimDate: getReportDateKey(dateStamp),
+        branchName: firstPresent(branchMap[branchId], branchId),
+        memberName: getCell(meta, row, ["MemberName", "Member Name"], 1, ""),
+        address: getCell(meta, row, ["MemberAddress", "Member Address"], 3, ""),
+        dateOfDeath: getReportDateKey(getCell(meta, row, ["DateOfDeath", "Date Of Death"], 4, "")),
+        beneficiaryName: getCell(meta, row, ["BeneficiaryName", "Beneficiary Name"], 5, ""),
+        relationship: getCell(meta, row, ["Relationship"], 6, ""),
+        modeOfRelease: getFirstPresentCell(meta, row, [
+          "ModeOfRelease",
+          "Mode of Release",
+          "ReleaseMode",
+          "Release Mode",
+          "TypeOfRelease",
+          "Type of Release"
+        ], -1, "")
+      });
+    }
+    claims.sort(function(a, b) { return b.claimDate.localeCompare(a.claimDate); });
+    return { success: true, reportType: reportType, dateFrom: dateFrom, dateTo: dateTo, claims: claims };
+  } catch (err) {
+    console.error("getClaimsSummaryReport error", err);
+    return { success: false, message: "Unable to generate the claims report." };
+  }
+}
+
+function getTrustedHospitalizationReferences(data) {
+  const memberMeta = getSheetMetadata(SHEETS.members, MEMBER_HEADERS);
+  const memberFound = findRowByValue(memberMeta, ["MemberID", "Member ID"], 0, data.memberID);
+  if (!memberFound) return { success: false, message: "The selected member no longer exists." };
+
+  const member = {
+    id: normalizeValue(getCell(memberMeta, memberFound.row, ["MemberID", "Member ID"], 0, "")),
+    name: getCell(memberMeta, memberFound.row, ["FullName", "Full Name", "Name"], 1, ""),
+    contactNumber: getCell(memberMeta, memberFound.row, ["ContactNumber", "Contact Number"], 3, ""),
+    branch: normalizeValue(getCell(memberMeta, memberFound.row, ["Branch", "BranchID", "Branch ID"], 4, "")),
+    status: getMemberStatusInfo(memberMeta, memberFound.row).active ? "Active" : "Inactive",
+    segmentation: normalizeValue(getCell(memberMeta, memberFound.row, ["Segmentation"], 6, "")),
+    gender: getCell(memberMeta, memberFound.row, ["Gender"], 7, "")
+  };
+
+  if (!isActiveRecordStatus(member.status)) {
+    return { success: false, message: "Only active members can file a claim." };
+  }
+  if (!canAccessBranch(data.authUser, member.branch)) {
+    return { success: false, code: "FORBIDDEN", message: "The selected member belongs to another branch." };
+  }
+
+  const hospitalsResult = getHospitals();
+  const requestedHospitalId = normalizeValue(data.hospitalID).toLowerCase();
+  const hospital = (hospitalsResult.hospitals || []).filter(function(item) {
+    return normalizeValue(item.id).toLowerCase() === requestedHospitalId;
+  })[0];
+  if (!hospital) return { success: false, message: "The selected hospital is invalid or inactive." };
+
+  const ratesResult = getSegmentationRates();
+  const rate = (ratesResult.rates || []).filter(function(item) {
+    return normalizeValue(item.segmentation).toLowerCase() === member.segmentation.toLowerCase();
+  })[0];
+  const dailyRate = toNumber(rate && rate.dailyRate, 0);
+  if (dailyRate <= 0) return { success: false, message: "No daily rate is configured for this member's segmentation." };
+
+  return { success: true, member: member, hospital: hospital, dailyRate: dailyRate };
 }
 
 function changePassword(data) {
   try {
+    getPasswordPepper();
     return withScriptLock(function() {
-      const email = normalizeEmail(data.email);
-      const currentPassword = normalizeValue(data.currentPassword);
-      const newPassword = normalizeValue(data.newPassword);
+      const email = normalizeEmail(data.authUser && data.authUser.email);
+      const currentPassword = String(data.currentPassword == null ? "" : data.currentPassword);
+      const newPassword = String(data.newPassword == null ? "" : data.newPassword);
 
       if (!email || !currentPassword || !newPassword) {
         return { success: false, message: "Email, current password, and new password are required." };
@@ -1259,17 +1663,26 @@ function changePassword(data) {
       }
 
       const savedPassword = normalizeValue(getCell(meta, found.row, ["Password"], 1, ""));
-      if (savedPassword !== currentPassword) {
+      if (!verifyPassword(currentPassword, savedPassword)) {
         return { success: false, message: "Current password is incorrect." };
       }
 
       setObjectFields(meta.sheet, found.rowNumber, meta, {
-        Password: newPassword,
+        Password: hashPassword(newPassword),
         FirstLogin: false,
         MustChangePassword: false
       });
 
-      return { success: true, message: "Password updated successfully." };
+      revokeSessionsForEmail(email);
+      const refreshedUser = getUserRecordByEmail(email);
+      const session = createSession(refreshedUser);
+
+      return {
+        success: true,
+        message: "Password updated successfully.",
+        sessionToken: session.token,
+        sessionExpiresAt: session.expiresAt
+      };
     });
   } catch (err) {
     return { success: false, message: "Error: " + err.toString() };
@@ -1284,29 +1697,24 @@ function forgotPassword(email) {
       return { success: false, message: "Email is required." };
     }
 
-    const meta = getSheetMetadata(SHEETS.users, USER_HEADERS);
+    const user = getUserRecordByEmail(normalizedEmail);
+    if (user && !isPasswordResetRateLimited(normalizedEmail)) {
+      const temporaryPassword = Utilities.getUuid().replace(/-/g, "").slice(0, 16) + "!a7";
+      savePendingPasswordReset(normalizedEmail, temporaryPassword);
+      recordPasswordResetRequest(normalizedEmail);
 
-    for (let i = 1; i < meta.rows.length; i++) {
-      const rowEmail = normalizeEmail(getCell(meta, meta.rows[i], ["Email", "User", "Username"], 0, ""));
-
-      if (rowEmail === normalizedEmail) {
-        const password = normalizeValue(getCell(meta, meta.rows[i], ["Password"], 1, ""));
-        const fullname = normalizeValue(getCell(meta, meta.rows[i], ["Fullname", "Full Name", "Name"], 3, "User"));
-
-        MailApp.sendEmail(
-          normalizedEmail,
-          "Members Claims System - Password Recovery",
-          "Hello " + fullname + ",\n\n" +
-          "Your current password is: " + password + "\n\n" +
-          "Please sign in and change it as soon as possible.\n\n" +
-          "If you did not request this, please contact your administrator."
-        );
-
-        return { success: true, message: "Password recovery email has been sent." };
-      }
+      MailApp.sendEmail(
+        normalizedEmail,
+        "Members Claims System - Temporary Password",
+        "Hello " + (user.fullname || "User") + ",\n\n" +
+        "A password reset was requested for your account. Your one-time temporary password is:\n\n" +
+        temporaryPassword + "\n\n" +
+        "This temporary password expires in 30 minutes. Sign in and replace it immediately. Your current password remains active until this temporary password is used. If you did not request this reset, contact your administrator."
+      );
     }
 
-    return { success: false, message: "No account found for that email." };
+    // Always return the same response to avoid disclosing registered accounts.
+    return { success: true, message: "If that account exists, a temporary password has been sent." };
   } catch (err) {
     return { success: false, message: "Error: " + err.toString() };
   }
@@ -1341,6 +1749,7 @@ function getUsers() {
 
 function createUser(data) {
   try {
+    getPasswordPepper();
     return withScriptLock(function() {
       const meta = getSheetMetadata(SHEETS.users, USER_HEADERS);
       const email = normalizeEmail(data.email);
@@ -1354,6 +1763,9 @@ function createUser(data) {
       if (!email || !password || !role || !fullname || !position) {
         return { success: false, message: "Email, password, role, fullname, and position are required." };
       }
+      if (password.length < 8) {
+        return { success: false, message: "Temporary passwords must be at least 8 characters long." };
+      }
 
       if (findRowByValue(meta, ["Email", "User", "Username"], 0, email)) {
         return { success: false, message: "A user with this email already exists." };
@@ -1361,7 +1773,7 @@ function createUser(data) {
 
       appendObjectRow(meta.sheet, meta, {
         Email: email,
-        Password: password,
+        Password: hashPassword(password),
         Role: role,
         Fullname: fullname,
         Position: position,
@@ -1379,6 +1791,7 @@ function createUser(data) {
 
 function updateUser(data) {
   try {
+    if (data.password) getPasswordPepper();
     return withScriptLock(function() {
       const meta = getSheetMetadata(SHEETS.users, USER_HEADERS);
       const originalEmail = normalizeEmail(data.originalEmail);
@@ -1412,10 +1825,18 @@ function updateUser(data) {
       };
 
       if (data.password) {
-        updates.Password = normalizeValue(data.password);
+        const newPassword = normalizeValue(data.password);
+        if (newPassword.length < 8) {
+          return { success: false, message: "Temporary passwords must be at least 8 characters long." };
+        }
+        updates.Password = hashPassword(newPassword);
+        updates.FirstLogin = true;
+        updates.MustChangePassword = true;
       }
 
       setObjectFields(meta.sheet, found.rowNumber, meta, updates);
+      revokeSessionsForEmail(originalEmail);
+      if (email !== originalEmail) revokeSessionsForEmail(email);
       return { success: true };
     });
   } catch (err) {
@@ -1423,35 +1844,389 @@ function updateUser(data) {
   }
 }
 
-function getMembers(branchMapOverride) {
+function getMembers(data, branchMapOverride) {
   try {
     const meta = getSheetMetadata(SHEETS.members, MEMBER_HEADERS);
     const branchMap = branchMapOverride || getBranchMap();
+    const user = data && data.authUser;
     const members = [];
+    const diagnostics = {
+      totalRows: Math.max(meta.rows.length - 1, 0),
+      rowsWithMemberId: 0,
+      activeRows: 0,
+      branchMatchedRows: 0,
+      activeBranchMatchedRows: 0,
+      crsBranchId: user && user.role === "crs" ? normalizeValue(user.branchid) : ""
+    };
+
+    const branchAliases = {};
+    Object.keys(branchMap).forEach(function(branchId) {
+      const canonicalId = normalizeHeaderName(branchId);
+      const branchName = normalizeHeaderName(branchMap[branchId]);
+      if (canonicalId) branchAliases[canonicalId] = canonicalId;
+      if (branchName) branchAliases[branchName] = canonicalId || branchName;
+    });
+
+    function canonicalBranch(value) {
+      const key = normalizeHeaderName(value);
+      return branchAliases[key] || key;
+    }
 
     for (let i = 1; i < meta.rows.length; i++) {
       const row = meta.rows[i];
       const memberID = normalizeValue(getCell(meta, row, ["MemberID", "Member ID"], 0, ""));
       if (!memberID) continue;
+      diagnostics.rowsWithMemberId++;
       const branchId = normalizeValue(getCell(meta, row, ["Branch", "BranchID", "Branch ID"], 4, ""));
+      const statusInfo = getMemberStatusInfo(meta, row);
+      const isActive = statusInfo.active;
+      const branchMatches = !user || user.role !== "crs" ||
+        canonicalBranch(user.branchid) === canonicalBranch(branchId);
+      if (isActive) diagnostics.activeRows++;
+      if (branchMatches) diagnostics.branchMatchedRows++;
+      if (isActive && branchMatches) diagnostics.activeBranchMatchedRows++;
+      if (!branchMatches) continue;
 
       members.push({
         memberID: memberID,
         fullName: getCell(meta, row, ["FullName", "Full Name", "Name"], 1, ""),
-        address: getCell(meta, row, ["Address"], 2, ""),
+        address: getFirstPresentCell(meta, row, [
+          "Address",
+          "MemberAddress",
+          "Member Address",
+          "HomeAddress",
+          "Home Address",
+          "ResidentialAddress",
+          "Residential Address",
+          "PermanentAddress",
+          "Permanent Address"
+        ], 2, ""),
         contactNumber: getCell(meta, row, ["ContactNumber", "Contact Number"], 3, ""),
         branch: branchId,
         branchName: branchMap[normalizeValue(branchId)] || branchId,
-        status: getCell(meta, row, ["Status"], 5, ""),
+        status: isActive ? "Active" : "Inactive",
+        membershipStatus: statusInfo.membershipStatus,
+        enabledStatus: statusInfo.enabledStatus,
         segmentation: getCell(meta, row, ["Segmentation"], 6, ""),
         gender: getCell(meta, row, ["Gender"], 7, "")
       });
     }
 
-    return { success: true, members: members };
+    return { success: true, members: members, diagnostics: diagnostics };
   } catch (err) {
     return { success: false, message: "Error: " + err.toString() };
   }
+}
+
+function bytesToBase64Url(bytes) {
+  return Utilities.base64EncodeWebSafe(bytes).replace(/=+$/g, "");
+}
+
+function sha256Base64Url(value) {
+  return bytesToBase64Url(Utilities.computeDigest(
+    Utilities.DigestAlgorithm.SHA_256,
+    String(value == null ? "" : value),
+    Utilities.Charset.UTF_8
+  ));
+}
+
+function getPasswordPepper() {
+  const properties = PropertiesService.getScriptProperties();
+  let pepper = properties.getProperty("PASSWORD_PEPPER");
+  if (pepper) return pepper;
+
+  const lock = LockService.getScriptLock();
+  lock.waitLock(30000);
+  try {
+    pepper = properties.getProperty("PASSWORD_PEPPER");
+    if (!pepper) {
+      pepper = Utilities.getUuid() + Utilities.getUuid();
+      properties.setProperty("PASSWORD_PEPPER", pepper);
+    }
+  } finally {
+    lock.releaseLock();
+  }
+  return pepper;
+}
+
+function derivePasswordHash(password, salt, iterations) {
+  const key = Utilities.newBlob(String(password) + getPasswordPepper()).getBytes();
+  const saltBytes = Utilities.newBlob(String(salt)).getBytes().concat([0, 0, 0, 1]);
+  let block = Utilities.computeHmacSha256Signature(saltBytes, key);
+  const derived = block.slice();
+
+  for (let i = 1; i < iterations; i++) {
+    block = Utilities.computeHmacSha256Signature(block, key);
+    for (let j = 0; j < derived.length; j++) derived[j] = derived[j] ^ block[j];
+  }
+
+  return bytesToBase64Url(derived);
+}
+
+function hashPassword(password) {
+  const salt = Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "");
+  const digest = derivePasswordHash(password, salt, PASSWORD_HASH_ITERATIONS);
+  return [PASSWORD_HASH_PREFIX, PASSWORD_HASH_ITERATIONS, salt, digest].join("$");
+}
+
+function constantTimeEquals(left, right) {
+  const a = String(left || "");
+  const b = String(right || "");
+  let difference = a.length ^ b.length;
+  const length = Math.max(a.length, b.length);
+  for (let i = 0; i < length; i++) {
+    difference |= (a.charCodeAt(i % Math.max(a.length, 1)) || 0) ^
+      (b.charCodeAt(i % Math.max(b.length, 1)) || 0);
+  }
+  return difference === 0;
+}
+
+function verifyPassword(password, storedPassword) {
+  const saved = normalizeValue(storedPassword);
+  const parts = saved.split("$");
+  if (parts.length === 4 && parts[0] === PASSWORD_HASH_PREFIX) {
+    const iterations = Number(parts[1]);
+    if (!Number.isFinite(iterations) || iterations < 1 || iterations > 100000) return false;
+    return constantTimeEquals(derivePasswordHash(password, parts[2], iterations), parts[3]);
+  }
+
+  // Compatibility path for current accounts. A successful login immediately
+  // replaces this legacy plaintext value with a salted password hash.
+  return constantTimeEquals(normalizeValue(password), saved);
+}
+
+function getUserRecordByEmail(email) {
+  const meta = getSheetMetadata(SHEETS.users, USER_HEADERS);
+  const found = findRowByValue(meta, ["Email", "User", "Username"], 0, normalizeEmail(email));
+  if (!found) return null;
+
+  const firstLogin = normalizeFlag(getCell(meta, found.row, ["FirstLogin", "First Login"], 6, false));
+  const mustChangePassword = normalizeFlag(getCell(meta, found.row, ["MustChangePassword", "Must Change Password"], 7, firstLogin));
+  return {
+    email: normalizeEmail(getCell(meta, found.row, ["Email", "User", "Username"], 0, "")),
+    password: normalizeValue(getCell(meta, found.row, ["Password"], 1, "")),
+    role: normalizeRole(getCell(meta, found.row, ["Role"], 2, "")),
+    fullname: getCell(meta, found.row, ["Fullname", "Full Name", "Name"], 3, ""),
+    position: getCell(meta, found.row, ["Position"], 4, ""),
+    branchid: normalizeValue(getCell(meta, found.row, ["BranchId", "Branch ID"], 5, "")),
+    mustChangePassword: firstLogin || mustChangePassword,
+    meta: meta,
+    row: found.row,
+    rowNumber: found.rowNumber
+  };
+}
+
+function createSession(user) {
+  const token = Utilities.getUuid().replace(/-/g, "") + Utilities.getUuid().replace(/-/g, "");
+  const expiresAt = Date.now() + SESSION_TTL_MS;
+  const key = SESSION_PROPERTY_PREFIX + sha256Base64Url(token);
+  PropertiesService.getScriptProperties().setProperty(key, JSON.stringify({
+    email: user.email,
+    expiresAt: expiresAt
+  }));
+  cleanupExpiredSessions();
+  return { token: token, expiresAt: expiresAt };
+}
+
+function cleanupExpiredSessions() {
+  const properties = PropertiesService.getScriptProperties();
+  const all = properties.getProperties();
+  const now = Date.now();
+  Object.keys(all).forEach(function(key) {
+    if (key.indexOf(SESSION_PROPERTY_PREFIX) !== 0) return;
+    try {
+      const session = JSON.parse(all[key]);
+      if (!session.expiresAt || Number(session.expiresAt) <= now) properties.deleteProperty(key);
+    } catch (err) {
+      properties.deleteProperty(key);
+    }
+  });
+}
+
+function revokeSession(token) {
+  if (!token) return;
+  PropertiesService.getScriptProperties().deleteProperty(
+    SESSION_PROPERTY_PREFIX + sha256Base64Url(token)
+  );
+}
+
+function revokeSessionsForEmail(email) {
+  const normalizedEmail = normalizeEmail(email);
+  const properties = PropertiesService.getScriptProperties();
+  const all = properties.getProperties();
+  Object.keys(all).forEach(function(key) {
+    if (key.indexOf(SESSION_PROPERTY_PREFIX) !== 0) return;
+    try {
+      const session = JSON.parse(all[key]);
+      if (normalizeEmail(session.email) === normalizedEmail) properties.deleteProperty(key);
+    } catch (err) {
+      properties.deleteProperty(key);
+    }
+  });
+}
+
+function passwordResetPropertyKey(email) {
+  return PASSWORD_RESET_PROPERTY_PREFIX + sha256Base64Url(normalizeEmail(email));
+}
+
+function savePendingPasswordReset(email, temporaryPassword) {
+  PropertiesService.getScriptProperties().setProperty(
+    passwordResetPropertyKey(email),
+    JSON.stringify({
+      passwordHash: hashPassword(temporaryPassword),
+      expiresAt: Date.now() + PASSWORD_RESET_TTL_MS
+    })
+  );
+}
+
+function getPendingPasswordReset(email) {
+  const properties = PropertiesService.getScriptProperties();
+  const key = passwordResetPropertyKey(email);
+  const raw = properties.getProperty(key);
+  if (!raw) return null;
+  try {
+    const reset = JSON.parse(raw);
+    if (!reset.expiresAt || Number(reset.expiresAt) <= Date.now()) {
+      properties.deleteProperty(key);
+      return null;
+    }
+    return reset;
+  } catch (err) {
+    properties.deleteProperty(key);
+    return null;
+  }
+}
+
+function clearPendingPasswordReset(email) {
+  PropertiesService.getScriptProperties().deleteProperty(passwordResetPropertyKey(email));
+}
+
+function authenticateRequest(data) {
+  const token = normalizeValue(data && firstPresent(data.sessionToken, data.session_token));
+  if (!token) return { success: false, code: "AUTH_REQUIRED", message: "Please sign in again." };
+
+  const properties = PropertiesService.getScriptProperties();
+  const key = SESSION_PROPERTY_PREFIX + sha256Base64Url(token);
+  const raw = properties.getProperty(key);
+  if (!raw) return { success: false, code: "AUTH_REQUIRED", message: "Your session is invalid or has expired. Please sign in again." };
+
+  let session;
+  try {
+    session = JSON.parse(raw);
+  } catch (err) {
+    properties.deleteProperty(key);
+    return { success: false, code: "AUTH_REQUIRED", message: "Your session is invalid. Please sign in again." };
+  }
+
+  if (!session.expiresAt || Number(session.expiresAt) <= Date.now()) {
+    properties.deleteProperty(key);
+    return { success: false, code: "AUTH_REQUIRED", message: "Your session has expired. Please sign in again." };
+  }
+
+  const user = getUserRecordByEmail(session.email);
+  if (!user || !user.role) {
+    properties.deleteProperty(key);
+    return { success: false, code: "AUTH_REQUIRED", message: "Your account is no longer available." };
+  }
+
+  return { success: true, token: token, user: user };
+}
+
+function authorizeAction(data) {
+  const auth = authenticateRequest(data);
+  if (!auth.success) return auth;
+
+  const action = normalizeValue(data.action);
+  const allowedRoles = ACTION_ROLES[action] || [];
+  if (allowedRoles.indexOf(auth.user.role) === -1) {
+    return { success: false, code: "FORBIDDEN", message: "You are not authorized to perform this action." };
+  }
+
+  if (auth.user.mustChangePassword && action !== "changePassword" && action !== "logout") {
+    return { success: false, code: "PASSWORD_CHANGE_REQUIRED", message: "You must change your temporary password before continuing." };
+  }
+
+  return auth;
+}
+
+function applyTrustedIdentity(data, user) {
+  const trusted = {};
+  Object.keys(data || {}).forEach(function(key) { trusted[key] = data[key]; });
+  trusted.role = user.role;
+  trusted.user = user.email;
+  trusted.email = user.email;
+  trusted.branchid = user.branchid;
+  trusted.branch = user.branchid;
+  trusted.memberBranchId = user.branchid;
+  trusted.tellerEmail = user.email;
+  trusted.tellerName = user.fullname;
+  trusted.tellerBranchId = user.branchid;
+  trusted.branchManagerEmail = user.email;
+  trusted.branchManagerName = user.fullname;
+  trusted.financeManagerEmail = user.email;
+  trusted.financeManagerName = user.fullname;
+  trusted.authUser = user;
+  return trusted;
+}
+
+function roleHasGlobalClaimAccess(role) {
+  return ["admin", "membership_specialist", "finance_head", "savings_credit_head"].indexOf(normalizeRole(role)) !== -1;
+}
+
+function canAccessBranch(user, branchId) {
+  if (!user) return false;
+  if (roleHasGlobalClaimAccess(user.role)) return true;
+  const userBranch = normalizeValue(user.branchid);
+  const requestedBranch = normalizeValue(branchId);
+  if (!userBranch || !requestedBranch) return false;
+  if (normalizeHeaderName(userBranch) === normalizeHeaderName(requestedBranch)) return true;
+
+  // Accept either the branch ID or branch name. This keeps authorization strict
+  // to one branch while supporting sheets that store those two representations.
+  const branchMap = getBranchMap();
+  let userCanonical = normalizeHeaderName(userBranch);
+  let requestedCanonical = normalizeHeaderName(requestedBranch);
+  Object.keys(branchMap).forEach(function(id) {
+    const canonicalId = normalizeHeaderName(id);
+    const name = normalizeHeaderName(branchMap[id]);
+    if (userCanonical === canonicalId || userCanonical === name) userCanonical = canonicalId;
+    if (requestedCanonical === canonicalId || requestedCanonical === name) requestedCanonical = canonicalId;
+  });
+  return Boolean(userCanonical) && userCanonical === requestedCanonical;
+}
+
+function authenticationFailureKey(email) {
+  return "login_fail_" + sha256Base64Url(normalizeEmail(email)).slice(0, 32);
+}
+
+function isLoginRateLimited(email) {
+  const count = Number(CacheService.getScriptCache().get(authenticationFailureKey(email)) || 0);
+  return count >= LOGIN_FAILURE_LIMIT;
+}
+
+function recordLoginFailure(email) {
+  const cache = CacheService.getScriptCache();
+  const key = authenticationFailureKey(email);
+  const count = Number(cache.get(key) || 0) + 1;
+  cache.put(key, String(count), LOGIN_FAILURE_TTL_SECONDS);
+}
+
+function clearLoginFailures(email) {
+  CacheService.getScriptCache().remove(authenticationFailureKey(email));
+}
+
+function passwordResetRateKey(email) {
+  return "password_reset_rate_" + sha256Base64Url(normalizeEmail(email)).slice(0, 32);
+}
+
+function isPasswordResetRateLimited(email) {
+  return Number(CacheService.getScriptCache().get(passwordResetRateKey(email)) || 0) >= PASSWORD_RESET_LIMIT;
+}
+
+function recordPasswordResetRequest(email) {
+  const cache = CacheService.getScriptCache();
+  const key = passwordResetRateKey(email);
+  cache.put(key, String(Number(cache.get(key) || 0) + 1), PASSWORD_RESET_RATE_TTL_SECONDS);
 }
 
 function canManageMembers(data) {
@@ -1637,11 +2412,11 @@ function getHospitals() {
   try {
     const meta = getSheetMetadata(SHEETS.hospitals, []);
     const hospitals = [];
-    const nameIndex = getHeaderIndex(meta, ["Name", "HospitalName", "Hospital Name", "Hospital"], -1);
-    const idIndex = getHeaderIndex(meta, ["ID", "HospitalID", "Hospital ID"], -1);
-    const addressIndex = getHeaderIndex(meta, ["Address"], -1);
-    const contactIndex = getHeaderIndex(meta, ["ContactNumber", "Contact Number"], -1);
-    const statusIndex = getHeaderIndex(meta, ["Status"], -1);
+    const nameIndex = getHeaderIndex(meta, ["Name", "HospitalName", "Hospital Name", "Hospital", "Facility Name"], -1);
+    const idIndex = getHeaderIndex(meta, ["ID", "HospitalID", "Hospital ID", "Hospital Code", "Code"], -1);
+    const addressIndex = getHeaderIndex(meta, ["Address", "Hospital Address", "Facility Address"], -1);
+    const contactIndex = getHeaderIndex(meta, ["ContactNumber", "Contact Number", "Contact", "Phone Number"], -1);
+    const statusIndex = getHeaderIndex(meta, ["Status", "Active Status", "Is Active"], -1);
     const headerIndexes = [nameIndex, idIndex, addressIndex, contactIndex, statusIndex]
       .filter(function(index) {
         return index >= 0;
@@ -1702,7 +2477,7 @@ function getHospitals() {
       if (!id) id = name;
       if (!id || !name) continue;
 
-      if (status && status.toLowerCase() !== "active") continue;
+      if (status && !isActiveRecordStatus(status)) continue;
 
       hospitals.push({
         id: id,
@@ -1797,14 +2572,14 @@ function getSegmentationRates() {
   }
 }
 
-function getTellerReferenceData() {
+function getTellerReferenceData(data) {
   try {
     const branchesResult = getBranches();
     const branchMap = {};
     (branchesResult.branches || []).forEach(function(branch) {
       branchMap[normalizeValue(branch.branchID)] = branch.branchName || branch.branchID;
     });
-    const membersResult = getMembers(branchMap);
+    const membersResult = getMembers(data, branchMap);
     const hospitalsResult = getHospitals();
     const ratesResult = getSegmentationRates();
 
@@ -1814,7 +2589,10 @@ function getTellerReferenceData() {
 
     return {
       success: true,
-      members: membersResult.members || [],
+      members: (membersResult.members || []).filter(function(member) {
+        return isActiveRecordStatus(member.status);
+      }),
+      memberDiagnostics: membersResult.diagnostics || {},
       branches: branchesResult.branches || [],
       hospitals: hospitalsResult.hospitals || [],
       rates: ratesResult.rates || []
@@ -1952,55 +2730,67 @@ function saveSignature(data) {
 }
 
 function handleAction(data) {
-  const action = data.action;
+  data = data || {};
+  const action = normalizeValue(data.action);
+
+  // Only sign-in and recovery are public. Every other route requires an
+  // unexpired server-side session and an allowed role.
+  if (action === "login") return login(data.email, data.password);
+  if (action === "forgotPassword") return forgotPassword(data.email);
+  if (!ACTION_ROLES[action]) return { success: false, message: "Unknown action: " + String(action || "") };
+
+  const authorization = authorizeAction(data);
+  if (!authorization.success) return authorization;
+  const trustedData = applyTrustedIdentity(data, authorization.user);
 
   switch (action) {
-    case "login":
-      return login(data.email, data.password);
     case "changePassword":
-      return changePassword(data);
-    case "forgotPassword":
-      return forgotPassword(data.email);
+      return changePassword(trustedData);
+    case "logout":
+      revokeSession(authorization.token);
+      return { success: true };
     case "createRequest":
-      return createRequest(data);
+      return createRequest(trustedData);
     case "editRequest":
-      return editRequest(data);
+      return editRequest(trustedData);
     case "getRequests":
-      return getRequests(data.includeAttachments !== false);
+      return getRequests(trustedData);
     case "getRequestAttachments":
-      return getRequestAttachments(data.request_id);
+      return getRequestAttachments(trustedData.request_id, authorization.user);
     case "updateStatus":
-      return updateStatus(data);
+      return updateStatus(trustedData);
     case "createKaramayClaim":
-      return createKaramayClaim(data);
+      return createKaramayClaim(trustedData);
     case "editKaramayClaim":
-      return editKaramayClaim(data);
+      return editKaramayClaim(trustedData);
     case "getKaramayClaims":
-      return getKaramayClaims(data.includeAttachments !== false);
+      return getKaramayClaims(trustedData);
     case "getKaramayClaimAttachments":
-      return getKaramayClaimAttachments(data.request_id);
+      return getKaramayClaimAttachments(trustedData.request_id, authorization.user);
     case "getDashboardCounts":
-      return getDashboardCounts();
+      return getDashboardCounts(trustedData);
+    case "getClaimsSummaryReport":
+      return getClaimsSummaryReport(trustedData);
     case "getSettings":
       return getSettings();
     case "saveSettings":
-      return saveSettings(data.settings || {});
+      return saveSettings(trustedData.settings || {});
     case "saveSignature":
-      return saveSignature(data);
+      return saveSignature(trustedData);
     case "getUsers":
       return getUsers();
     case "createUser":
-      return createUser(data);
+      return createUser(trustedData);
     case "updateUser":
-      return updateUser(data);
+      return updateUser(trustedData);
     case "getMembers":
-      return getMembers();
+      return getMembers(trustedData);
     case "saveMember":
-      return saveMember(data);
+      return saveMember(trustedData);
     case "setMemberStatus":
-      return setMemberStatus(data);
+      return setMemberStatus(trustedData);
     case "importMembers":
-      return importMembers(data);
+      return importMembers(trustedData);
     case "getBranches":
       return getBranches();
     case "getHospitals":
@@ -2010,7 +2800,7 @@ function handleAction(data) {
     case "getSegmentationRates":
       return getSegmentationRates();
     case "getTellerReferenceData":
-      return getTellerReferenceData();
+      return getTellerReferenceData(trustedData);
     default:
       return { success: false, message: "Unknown action: " + String(action || "") };
   }
