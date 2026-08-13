@@ -5344,7 +5344,6 @@ function renderKaramayClaims() {
   const branchId = String(localStorage.getItem('branchid') || '').trim();
   const isBranchVerifierDashboard = Boolean(document.getElementById('reviewView'));
 
-  const normalizedBranchId = normalizeValue(branchId);
   const searchText = normalizeValue(document.getElementById('adminKaramaySearch')?.value || '');
   const statusFilter = document.getElementById('adminKaramayStatusFilter')?.value || 'All Statuses';
   const rows = (allKaramayClaims || [])
@@ -5358,7 +5357,7 @@ function renderKaramayClaims() {
         return karamayClaimBelongsToBranch(row, branchId);
       }
       if (normalizedRole === 'membership_specialist') {
-        return !normalizedBranchId || karamayClaimBelongsToBranch(row, branchId);
+        return true;
       }
       if (normalizedRole === 'savings_credit_head' || normalizedRole === 'finance_head' || normalizedRole === 'admin') {
         return true;
