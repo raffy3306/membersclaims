@@ -5442,7 +5442,7 @@ async function ensureKaramayBranchReferences() {
     console.warn("Unable to load branch references for Karamay claims:", err);
   }
 }
-dfunction renderKaramayClaims() {
+function renderKaramayClaims() {
   const role = getCurrentRole();
   const normalizedRole = normalizeRole(role);
   const branchId = String(localStorage.getItem('branchid') || '').trim();
