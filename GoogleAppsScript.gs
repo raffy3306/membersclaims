@@ -2169,6 +2169,22 @@ function applyTrustedIdentity(data, user) {
   return trusted;
 }
 
+function getAdminUserManagementData(data) {
+  // createUser/updateUser intentionally operate on another account. Keep only
+  // their target fields instead of replacing them with the admin's identity.
+  data = data || {};
+  return {
+    originalEmail: data.originalEmail,
+    email: data.email,
+    password: data.password,
+    role: data.role,
+    fullname: data.fullname,
+    position: data.position,
+    branchid: data.branchid,
+    firstLogin: data.firstLogin
+  };
+}
+
 function roleHasGlobalClaimAccess(role) {
   return ["admin", "membership_specialist", "finance_head", "savings_credit_head"].indexOf(normalizeRole(role)) !== -1;
 }
@@ -2780,9 +2796,9 @@ function handleAction(data) {
     case "getUsers":
       return getUsers();
     case "createUser":
-      return createUser(trustedData);
+      return createUser(getAdminUserManagementData(data));
     case "updateUser":
-      return updateUser(trustedData);
+      return updateUser(getAdminUserManagementData(data));
     case "getMembers":
       return getMembers(trustedData);
     case "saveMember":
