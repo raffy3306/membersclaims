@@ -1,4 +1,4 @@
-const API = "https://script.google.com/macros/s/AKfycbywfLp8KD-qrro3DzCY0ymdn_CgfN5UgltKGSeYLrYMNjsL7_vCaMhkPIrje6HkAiUCIw/exec";
+const API = "https://script.google.com/macros/s/AKfycbzAtnTO0I81Qp5i1cYmZEfv9wJoMhgJlzt1KlFLm7NcB46M8_V8Wbid58rtQKyHM_f9VA/exec";
 // Apps Script web apps reject CORS preflight OPTIONS requests, so POST JSON as plain text.
 const APPS_SCRIPT_JSON_HEADERS = { "Content-Type": "text/plain;charset=utf-8" };
 
@@ -1657,6 +1657,7 @@ let requestSubmissionId = null;
 let isKaramayClaimSubmitting = false;
 let segmentationRates = {};
 let editingUserEmail = null;
+let isUserSaving = false;
 
 function getRoleLabel(role) {
   return ROLE_LABELS[normalizeRole(role)] || "User";
@@ -4534,6 +4535,28 @@ function resetUserForm() {
   if (firstLoginInput) firstLoginInput.checked = true;
 }
 
+function setUserFormSaving(isSaving, isEditing = Boolean(editingUserEmail)) {
+  isUserSaving = isSaving;
+
+  const modal = document.getElementById('userModal');
+  const submitButton = document.getElementById('userSubmitButton');
+
+  if (modal) {
+    modal.classList.toggle('user-form-saving', isSaving);
+    modal.querySelectorAll('input, select, button').forEach(control => {
+      control.disabled = isSaving;
+    });
+  }
+
+  if (submitButton) {
+    submitButton.classList.toggle('is-saving', isSaving);
+    submitButton.setAttribute('aria-busy', String(isSaving));
+    submitButton.innerHTML = isSaving
+      ? `<span class="user-save-spinner" aria-hidden="true"></span>${isEditing ? 'Updating User...' : 'Saving User...'}`
+      : (isEditing ? 'Update User' : 'Save User');
+  }
+}
+
 function openUserModal(mode = 'create', index = null) {
   const modal = document.getElementById('userModal');
   const title = document.getElementById('userModalTitle');
@@ -4580,6 +4603,8 @@ function closeUserModal() {
 }
 
 async function submitUserForm() {
+  if (isUserSaving) return;
+
   const email = document.getElementById('userEmailInput')?.value.trim().toLowerCase() || '';
   const password = document.getElementById('userPasswordInput')?.value || '';
   const fullname = document.getElementById('userFullnameInput')?.value.trim() || '';
@@ -4598,6 +4623,8 @@ async function submitUserForm() {
     alert('Please enter a default password.');
     return;
   }
+
+  setUserFormSaving(true, isEditing);
 
   try {
     const res = await fetch(API, {
@@ -4621,12 +4648,15 @@ async function submitUserForm() {
       return;
     }
 
+    setUserFormSaving(false, isEditing);
     alert(isEditing ? 'User updated successfully.' : 'User created successfully.');
     closeUserModal();
     loadUsers();
   } catch (err) {
     console.error('Failed to save user', err);
     alert('Failed to save user.');
+  } finally {
+    if (isUserSaving) setUserFormSaving(false, isEditing);
   }
 }
 
@@ -5412,8 +5442,7 @@ async function ensureKaramayBranchReferences() {
     console.warn("Unable to load branch references for Karamay claims:", err);
   }
 }
-
-function renderKaramayClaims() {
+dfunction renderKaramayClaims() {
   const role = getCurrentRole();
   const normalizedRole = normalizeRole(role);
   const branchId = String(localStorage.getItem('branchid') || '').trim();
