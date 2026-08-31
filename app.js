@@ -1760,6 +1760,7 @@ async function login() {
 
   try {
     if (loginButton) {
+      loginButton.dataset.busy = "true";
       loginButton.disabled = true;
       loginButton.textContent = "Signing in...";
     }
@@ -1799,10 +1800,20 @@ async function login() {
     alert(err.message || "Connection error. Check your Google Apps Script deployment and internet connection.");
   } finally {
     if (loginButton) {
-      loginButton.disabled = false;
+      delete loginButton.dataset.busy;
       loginButton.textContent = originalButtonText || "Sign In";
+      updateLoginButtonState();
     }
   }
+}
+
+function updateLoginButtonState() {
+  const emailInput = document.getElementById("email");
+  const passwordInput = document.getElementById("password");
+  const loginButton = document.getElementById("loginButton");
+  if (!emailInput || !passwordInput || !loginButton || loginButton.dataset.busy === "true") return;
+
+  loginButton.disabled = !emailInput.value.trim() || !passwordInput.value;
 }
 
 function openFirstLoginPasswordModal(email) {
@@ -7660,4 +7671,153 @@ async function printKaramayClaim() {
     printWindow.print();
     printWindow.close();
   }, 500);
+}
+
+// Shared dashboard UI: responsive sidebar, keyboard login, and 10-row pagination.
+const DASHBOARD_PAGE_SIZE = 10;
+const dashboardPaginators = new WeakMap();
+
+function isEmptyTableMessage(row, rowCount) {
+  if (rowCount !== 1 || row.cells.length !== 1 || !row.cells[0].hasAttribute("colspan")) return false;
+  return /\b(no|loading|will appear|unable|failed)\b/i.test(row.textContent || "");
+}
+
+function paginateDashboardTable(table) {
+  if (!table || !table.tBodies.length || !table.closest(".main")) return;
+  const tbody = table.tBodies[0];
+  let state = dashboardPaginators.get(table);
+
+  if (!state) {
+    const controls = document.createElement("nav");
+    controls.className = "table-pagination";
+    controls.setAttribute("aria-label", "Table pagination");
+    controls.innerHTML = `
+      <span class="pagination-summary" aria-live="polite"></span>
+      <div class="pagination-actions">
+        <button type="button" class="pagination-button pagination-previous" aria-label="Previous page">Previous</button>
+        <span class="pagination-page"></span>
+        <button type="button" class="pagination-button pagination-next" aria-label="Next page">Next</button>
+      </div>`;
+    table.insertAdjacentElement("afterend", controls);
+
+    state = { page: 1, controls, observer: null };
+    dashboardPaginators.set(table, state);
+    controls.querySelector(".pagination-previous").addEventListener("click", () => {
+      state.page = Math.max(1, state.page - 1);
+      renderDashboardPage(table);
+    });
+    controls.querySelector(".pagination-next").addEventListener("click", () => {
+      state.page += 1;
+      renderDashboardPage(table);
+    });
+    state.observer = new MutationObserver(() => {
+      state.page = 1;
+      renderDashboardPage(table);
+    });
+    state.observer.observe(tbody, { childList: true });
+  }
+
+  renderDashboardPage(table);
+}
+
+function renderDashboardPage(table) {
+  const state = dashboardPaginators.get(table);
+  if (!state || !table.tBodies.length) return;
+
+  const rows = Array.from(table.tBodies[0].rows);
+  const emptyMessage = rows.find(row => isEmptyTableMessage(row, rows.length));
+  const dataRows = emptyMessage ? [] : rows;
+  const total = dataRows.length;
+  const totalPages = Math.max(1, Math.ceil(total / DASHBOARD_PAGE_SIZE));
+  state.page = Math.min(Math.max(1, state.page), totalPages);
+  const start = (state.page - 1) * DASHBOARD_PAGE_SIZE;
+  const end = Math.min(start + DASHBOARD_PAGE_SIZE, total);
+
+  rows.forEach((row, index) => {
+    row.hidden = Boolean(emptyMessage) ? row !== emptyMessage : index < start || index >= end;
+  });
+
+  state.controls.querySelector(".pagination-summary").textContent = total
+    ? `Showing ${start + 1}-${end} of ${total} records`
+    : "0 records";
+  state.controls.querySelector(".pagination-page").textContent = `Page ${state.page} of ${totalPages}`;
+  state.controls.querySelector(".pagination-previous").disabled = state.page === 1;
+  state.controls.querySelector(".pagination-next").disabled = state.page === totalPages;
+}
+
+function initializeDashboardSidebar() {
+  const sidebar = document.querySelector(".sidebar");
+  const main = document.querySelector(".main");
+  if (!sidebar || !main) return;
+
+  if (!sidebar.id) sidebar.id = "dashboardSidebar";
+  const toggle = document.createElement("button");
+  toggle.type = "button";
+  toggle.className = "dashboard-menu-toggle";
+  toggle.setAttribute("aria-controls", sidebar.id);
+  toggle.setAttribute("aria-label", "Toggle navigation menu");
+  toggle.innerHTML = '<span aria-hidden="true"></span><span aria-hidden="true"></span><span aria-hidden="true"></span>';
+
+  const overlay = document.createElement("button");
+  overlay.type = "button";
+  overlay.className = "sidebar-overlay";
+  overlay.setAttribute("aria-label", "Close navigation menu");
+  document.body.append(toggle, overlay);
+
+  const mobileQuery = window.matchMedia("(max-width: 800px)");
+  const sidebarIsOpen = () => mobileQuery.matches
+    ? document.body.classList.contains("sidebar-open")
+    : !document.body.classList.contains("sidebar-collapsed");
+  const syncState = () => toggle.setAttribute("aria-expanded", String(sidebarIsOpen()));
+  const closeMobileSidebar = () => {
+    if (mobileQuery.matches) document.body.classList.remove("sidebar-open");
+    syncState();
+  };
+
+  toggle.addEventListener("click", () => {
+    if (mobileQuery.matches) document.body.classList.toggle("sidebar-open");
+    else document.body.classList.toggle("sidebar-collapsed");
+    syncState();
+  });
+  overlay.addEventListener("click", closeMobileSidebar);
+  sidebar.addEventListener("click", event => {
+    if (event.target.closest(".sidebar-btn") && !event.target.closest(".sidebar-menu-toggle")) closeMobileSidebar();
+  });
+  document.addEventListener("keydown", event => {
+    if (event.key === "Escape") closeMobileSidebar();
+  });
+  mobileQuery.addEventListener?.("change", () => {
+    document.body.classList.remove("sidebar-open", "sidebar-collapsed");
+    syncState();
+  });
+  syncState();
+}
+
+function initializeLoginForm() {
+  const emailInput = document.getElementById("email");
+  const passwordInput = document.getElementById("password");
+  const loginButton = document.getElementById("loginButton");
+  if (!emailInput || !passwordInput || !loginButton) return;
+
+  emailInput.addEventListener("input", updateLoginButtonState);
+  passwordInput.addEventListener("input", updateLoginButtonState);
+  passwordInput.addEventListener("keydown", event => {
+    if (event.key === "Enter" && !loginButton.disabled) {
+      event.preventDefault();
+      login();
+    }
+  });
+  updateLoginButtonState();
+}
+
+function initializeSharedDashboardUi() {
+  initializeDashboardSidebar();
+  initializeLoginForm();
+  document.querySelectorAll(".main table").forEach(paginateDashboardTable);
+}
+
+if (document.readyState === "loading") {
+  document.addEventListener("DOMContentLoaded", initializeSharedDashboardUi, { once: true });
+} else {
+  initializeSharedDashboardUi();
 }
