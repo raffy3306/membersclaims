@@ -328,6 +328,7 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
       <div style="margin-bottom: 20px;">
         <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Attachments</label>
         <input id="requestAttachments" type="file" multiple style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <small style="display:block; margin-top:6px; color:#666;">Maximum 2 MB per file after compression. JPG, PNG and WebP photos are compressed automatically; PDFs and other files must already be 2 MB or smaller.</small>
       </div>
     </div>
     <div class="modal-footer">
@@ -406,10 +407,12 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
         <div>
           <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Certified True Copy of Death Certificate</label>
           <input id="karamayDeathCertificate" type="file" accept="image/*,.pdf" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <small style="display:block; margin-top:6px; color:#666;">Maximum 2 MB per file after compression. JPG, PNG and WebP photos are compressed automatically; PDFs and other files must already be 2 MB or smaller.</small>
         </div>
         <div>
           <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Photocopy of Valid ID of Beneficiary / Requestor</label>
           <input id="karamayValidId" type="file" accept="image/*,.pdf" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <small style="display:block; margin-top:6px; color:#666;">Maximum 2 MB per file after compression. JPG, PNG and WebP photos are compressed automatically; PDFs and other files must already be 2 MB or smaller.</small>
         </div>
       </div>
     </div>
