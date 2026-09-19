@@ -432,7 +432,9 @@ function getSheetByNameFlexible(spreadsheet, sheetName) {
 }
 
 function getSheet(sheetName, requiredHeaders) {
-  const spreadsheet = getSpreadsheet();
+  const karamaySheetId = sheetName === SHEETS.karamayClaims
+    ? PropertiesService.getScriptProperties().getProperty("KARAMAY_CLAIMS_SHEET_ID") : "";
+  const spreadsheet = karamaySheetId ? SpreadsheetApp.openById(karamaySheetId) : getSpreadsheet();
   let sheet = getSheetByNameFlexible(spreadsheet, sheetName);
 
   if (!sheet) {
@@ -630,17 +632,104 @@ function getKaramayAttachmentDataMeta() {
   return getSheetMetadata(SHEETS.karamayAttachmentData, KARAMAY_ATTACHMENT_DATA_HEADERS);
 }
 
+// Editor-only recovery; intentionally not exposed through dispatchAction.
+// Deploy this version and pause user submissions before running this function.
+function recoverKaramayClaimsStorage() {
+  return withScriptLock(function() {
+    const properties = PropertiesService.getScriptProperties();
+    const activeId = properties.getProperty("KARAMAY_CLAIMS_SHEET_ID");
+    if (activeId) {
+      const active = SpreadsheetApp.openById(activeId);
+      if (!getSheetByNameFlexible(active, SHEETS.karamayClaims)) {
+        throw new Error("Configured Karamay spreadsheet has no claims sheet. Recovery stopped.");
+      }
+      Logger.log("Karamay storage is already configured: %s", active.getUrl());
+      return active.getUrl();
+    }
+
+    const sourceBook = getSpreadsheet();
+    const source = getSheetByNameFlexible(sourceBook, SHEETS.karamayClaims);
+    if (!source) throw new Error("Original Karamay claims sheet was not found. Nothing changed.");
+    const values = source.getDataRange().getValues();
+    const headers = values[0].map(normalizeHeaderName);
+    if (headers.indexOf("claimid") < 0 || headers.indexOf("attachments") < 0) {
+      throw new Error("Original Karamay headers are not recognized. Nothing changed.");
+    }
+
+    // Copy values only, without the large chunk tab or unused formatted grid.
+    // Original records, files, and chunk data are never deleted or modified.
+    const targetBook = SpreadsheetApp.create("Members Claims - Karamay Records",
+      Math.max(values.length + 100, 1000), Math.max(values[0].length, KARAMAY_CLAIM_HEADERS.length));
+    properties.setProperty("KARAMAY_RECOVERY_CANDIDATE_ID", targetBook.getId());
+    targetBook.setSpreadsheetTimeZone(sourceBook.getSpreadsheetTimeZone());
+    const target = targetBook.getSheets()[0];
+    target.setName(SHEETS.karamayClaims);
+    for (let offset = 0; offset < values.length; offset += 100) {
+      const batch = values.slice(offset, offset + 100);
+      target.getRange(offset + 1, 1, batch.length, values[0].length).setValues(batch);
+    }
+    SpreadsheetApp.flush();
+    const copied = target.getRange(1, 1, values.length, values[0].length).getValues();
+    if (JSON.stringify(copied) !== JSON.stringify(values)) {
+      throw new Error("Recovery copy verification failed. Original storage is still active; candidate ID is in Script Properties.");
+    }
+    // Detect direct edits to the source during recovery as well as script writes.
+    if (JSON.stringify(source.getDataRange().getValues()) !== JSON.stringify(values)) {
+      throw new Error("Original claims changed during recovery. Original storage is still active; retry with submissions paused.");
+    }
+    ensureHeaders(target, KARAMAY_CLAIM_HEADERS);
+    SpreadsheetApp.flush();
+    properties.setProperty("KARAMAY_CLAIMS_SHEET_ID", targetBook.getId());
+    Logger.log("Verified %s Karamay data rows. Active storage: %s", values.length - 1, targetBook.getUrl());
+    return targetBook.getUrl();
+  });
+}
+
 function getAttachmentInlineData(attachment) {
   return String(
     attachment && (attachment.file_data || attachment.dataUrl || attachment.data_url) || ""
   );
 }
 
+const MAX_CLAIM_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+
+function decodeClaimAttachment(attachment, allowExistingOversize) {
+  const name = String(attachment.file_name || attachment.name || "attachment");
+  const match = /^data:([^;,]+);base64,([A-Za-z0-9+/=\r\n]+)$/.exec(getAttachmentInlineData(attachment));
+  if (!match) throw new Error("Please upload the attachment again: " + name);
+  const encoded = match[2].replace(/[\r\n]/g, "");
+  if (encoded.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(encoded)) {
+    throw new Error("Invalid attachment data: " + name);
+  }
+  const padding = encoded.endsWith("==") ? 2 : (encoded.endsWith("=") ? 1 : 0);
+  const expectedBytes = encoded.length / 4 * 3 - padding;
+  if (!allowExistingOversize && expectedBytes > MAX_CLAIM_ATTACHMENT_BYTES) {
+    throw new Error(name + " exceeds the 2 MB limit per attachment.");
+  }
+  const bytes = Utilities.base64Decode(encoded);
+  if (!bytes.length) throw new Error(name + " is empty. Please upload it again.");
+  if (!allowExistingOversize && bytes.length > MAX_CLAIM_ATTACHMENT_BYTES) {
+    throw new Error(name + " exceeds the 2 MB limit per attachment.");
+  }
+  return { attachment: attachment, bytes: bytes, mimeType: match[1] };
+}
+
+function validateHospitalizationAttachments(attachments) {
+  if (!Array.isArray(attachments)) throw new Error("Invalid attachment list.");
+  return attachments.map(function(attachment) {
+    const decoded = decodeClaimAttachment(attachment, false);
+    return Object.assign({}, attachment, {file_size: decoded.bytes.length, file_type: decoded.mimeType});
+  });
+}
+
 function hydrateKaramayAttachments(attachments, attachmentDataMeta) {
   const normalized = normalizeKaramayAttachments(attachments);
   if (!normalized.length) return [];
 
-  const meta = attachmentDataMeta || getKaramayAttachmentDataMeta();
+  const needsChunks = normalized.some(function(item) {
+    return !getAttachmentInlineData(item) && item.storage !== "drive" && (item.storage_id || item.storageId);
+  });
+  const meta = needsChunks ? (attachmentDataMeta || getKaramayAttachmentDataMeta()) : { rows: [] };
   let chunksByStorageId = meta.karamayChunksByStorageId;
   if (!chunksByStorageId) {
     chunksByStorageId = {};
@@ -659,6 +748,11 @@ function hydrateKaramayAttachments(attachments, attachmentDataMeta) {
 
   return normalized.map(function(attachment) {
     const hydrated = JSON.parse(JSON.stringify(attachment || {}));
+    if (!getAttachmentInlineData(hydrated) && hydrated.storage === "drive" && hydrated.drive_file_id) {
+      const blob = DriveApp.getFileById(hydrated.drive_file_id).getBlob();
+      hydrated.file_data = "data:" + blob.getContentType() + ";base64," + Utilities.base64Encode(blob.getBytes());
+      return hydrated;
+    }
     const storageId = normalizeValue(hydrated.storage_id || hydrated.storageId);
     if (!getAttachmentInlineData(hydrated) && storageId && chunksByStorageId[storageId]) {
       hydrated.file_data = chunksByStorageId[storageId]
@@ -670,57 +764,76 @@ function hydrateKaramayAttachments(attachments, attachmentDataMeta) {
   });
 }
 
-// Store attachment data in chunk rows on a separate spreadsheet tab. The
-// claim row keeps only small metadata references, avoiding the per-cell text
-// limit while creating no Google Drive files.
-function stageKaramayAttachmentsInSheet(claimId, attachments) {
-  const meta = getKaramayAttachmentDataMeta();
-  const storedAttachments = [];
-  const rowsToAppend = [];
-  const storageIds = [];
-  const timestamp = new Date().getTime();
+// Run once from the Apps Script editor to authorize Drive before deployment.
+// The folder stays private; attachment reads use the existing claim access checks.
+function setupKaramayAttachmentStorage() {
+  return withScriptLock(function() { return getKaramayAttachmentFolder_().getId(); });
+}
 
-  normalizeKaramayAttachments(attachments).forEach(function(attachment, attachmentIndex) {
-    const storedAttachment = JSON.parse(JSON.stringify(attachment || {}));
-    const inlineData = getAttachmentInlineData(storedAttachment);
+function getKaramayAttachmentFolder_() {
+  const properties = PropertiesService.getScriptProperties();
+  const folderId = properties.getProperty("KARAMAY_ATTACHMENT_FOLDER_ID");
+  if (folderId) return DriveApp.getFolderById(folderId);
+  const folder = DriveApp.createFolder("Members Claims - Karamay Attachments");
+  properties.setProperty("KARAMAY_ATTACHMENT_FOLDER_ID", folder.getId());
+  return folder;
+}
 
-    if (inlineData.indexOf("data:") === 0 && inlineData.indexOf(",") > -1) {
-      const storageId = String(claimId) + "-" + timestamp + "-" + attachmentIndex;
-      const documentType = getKaramayAttachmentDocumentType(storedAttachment, attachmentIndex);
-      storageIds.push(storageId);
-
-      for (let offset = 0, chunkIndex = 0; offset < inlineData.length; offset += KARAMAY_ATTACHMENT_CHUNK_SIZE, chunkIndex++) {
-        rowsToAppend.push([
-          storageId,
-          String(claimId),
-          documentType,
-          storedAttachment.file_name || storedAttachment.name || "attachment",
-          storedAttachment.file_type || storedAttachment.type || "application/octet-stream",
-          Number(storedAttachment.file_size || storedAttachment.size || 0),
-          chunkIndex,
-          inlineData.slice(offset, offset + KARAMAY_ATTACHMENT_CHUNK_SIZE)
-        ]);
-      }
-
-      storedAttachment.storage_id = storageId;
-      storedAttachment.storage = "sheet_chunks";
-      delete storedAttachment.file_data;
-      delete storedAttachment.dataUrl;
-      delete storedAttachment.data_url;
-      delete storedAttachment.drive_file_id;
-      delete storedAttachment.url;
-    }
-
-    storedAttachments.push(storedAttachment);
+// Store file bytes outside Sheets. Only a small, server-generated reference
+// is saved in the claim row. Never accept client-supplied Drive references.
+function stageKaramayAttachmentsInDrive(claimId, attachments, trustedExistingAttachments) {
+  const prepared = normalizeKaramayAttachments(attachments).map(function(attachment) {
+    // Previously saved documents remain usable; the limit applies to new uploads.
+    const unchanged = (trustedExistingAttachments || []).some(function(saved) {
+      return saved.document_type === attachment.document_type &&
+        getAttachmentInlineData(saved) === getAttachmentInlineData(attachment);
+    });
+    return decodeClaimAttachment(attachment, unchanged);
   });
-
-  if (rowsToAppend.length) {
-    meta.sheet
-      .getRange(meta.sheet.getLastRow() + 1, 1, rowsToAppend.length, KARAMAY_ATTACHMENT_DATA_HEADERS.length)
-      .setValues(rowsToAppend);
+  const createdFiles = [];
+  try {
+    const folder = getKaramayAttachmentFolder_();
+    const stored = prepared.map(function(item) {
+      const name = String(item.attachment.file_name || item.attachment.name || "attachment");
+      // Content-based names make retries and unchanged edits reuse the same file.
+      // Include claim ID and document type to keep claims/documents independent.
+      const key = JSON.stringify([String(claimId), item.attachment.document_type, name, item.mimeType,
+        Utilities.base64Encode(item.bytes)]);
+      const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256, key)
+        .map(function(value) { return ("0" + ((value + 256) % 256).toString(16)).slice(-2); }).join("");
+      const storageName = "KRM-" + digest;
+      // Existing IDs may only come from this claim's server-loaded attachments.
+      // This also reuses files uploaded before content-based naming was added.
+      const existing = (trustedExistingAttachments || []).find(function(saved) {
+        return saved.storage === "drive" && saved.drive_file_id &&
+          saved.document_type === item.attachment.document_type &&
+          String(saved.file_name || saved.name || "attachment") === name &&
+          getAttachmentInlineData(saved) === getAttachmentInlineData(item.attachment);
+      });
+      const matches = folder.getFilesByName(storageName);
+      let file = existing ? DriveApp.getFileById(existing.drive_file_id)
+        : (matches.hasNext() ? matches.next() : null);
+      if (!file) {
+        file = folder.createFile(Utilities.newBlob(item.bytes, item.mimeType, storageName));
+        createdFiles.push(file);
+      }
+      return {
+        document_type: item.attachment.document_type,
+        file_name: name,
+        file_type: item.mimeType,
+        file_size: item.bytes.length,
+        storage: "drive",
+        drive_file_id: file.getId()
+      };
+    });
+    return { attachments: stored };
+  } catch (err) {
+    // These files cannot yet be referenced by a saved claim.
+    createdFiles.forEach(function(file) {
+      try { file.setTrashed(true); } catch (cleanupError) { Logger.log("Could not remove staged Karamay file: %s", file.getId()); }
+    });
+    throw err;
   }
-
-  return { attachments: storedAttachments, storageIds: storageIds };
 }
 
 function cleanupOldKaramayAttachmentChunks(claimId, storageIdsToKeep) {
@@ -830,7 +943,7 @@ function getKaramayClaims(data) {
     const includeAttachments = !data || data.includeAttachments !== false;
     const user = data && data.authUser;
     const meta = getSheetMetadata(SHEETS.karamayClaims, KARAMAY_CLAIM_HEADERS);
-    const attachmentDataMeta = includeAttachments === false ? null : getKaramayAttachmentDataMeta();
+    const attachmentDataMeta = null;
     const rows = [KARAMAY_CLAIM_HEADERS];
 
     for (let i = 1; i < meta.rows.length; i++) {
@@ -879,7 +992,7 @@ function getKaramayClaimAttachments(requestId, user) {
       request_id: requestId,
       attachments: hydrateKaramayAttachments(
         parseAttachments(getCell(meta, found.row, ["Attachments"], 16, "")),
-        getKaramayAttachmentDataMeta()
+        null
       )
     };
   } catch (err) {
@@ -888,6 +1001,7 @@ function getKaramayClaimAttachments(requestId, user) {
 }
 
 function createKaramayClaim(data) {
+  let saveStage = "opening the Karamay claims sheet";
   try {
     if (!normalizeValue(data.branchid)) {
       return { success: false, message: "Your account does not have an assigned branch." };
@@ -913,12 +1027,14 @@ function createKaramayClaim(data) {
         return { success: false, message: "Please complete the beneficiary/requestor information." };
       }
 
-      if (attachments.length < 2) {
+      if (!hasRequiredKaramayAttachments(attachments)) {
         return { success: false, message: "Please upload the death certificate and valid ID attachments." };
       }
 
-      const stagedAttachments = stageKaramayAttachmentsInSheet(claimId, attachments);
+      saveStage = "saving Karamay attachment data";
+      const stagedAttachments = stageKaramayAttachmentsInDrive(claimId, attachments);
 
+      saveStage = "saving the Karamay claim row";
       appendObjectRow(meta.sheet, meta, {
         ClaimID: claimId,
         MemberName: data.memberName || "",
@@ -941,12 +1057,14 @@ function createKaramayClaim(data) {
         Attachments: JSON.stringify(stagedAttachments.attachments)
       });
 
-      cleanupOldKaramayAttachmentChunks(claimId, stagedAttachments.storageIds);
+      SpreadsheetApp.flush();
+      // Keep legacy chunks intact; new claims do not write to the attachment tab.
 
       return { success: true, request_id: claimId, claimID: claimId };
     });
   } catch (err) {
-    return { success: false, message: "Error: " + err.toString() };
+    Logger.log("createKaramayClaim failed while %s: %s", saveStage, err.stack || err.toString());
+    return { success: false, message: "Error while " + saveStage + ": " + err.toString() };
   }
 }
 
@@ -986,7 +1104,7 @@ function editKaramayClaim(data) {
         return { success: false, message: "Only returned Karamay claims can be edited." };
       }
 
-      const attachmentDataMeta = getKaramayAttachmentDataMeta();
+      const attachmentDataMeta = null;
       const existingAttachments = hydrateKaramayAttachments(
         parseAttachments(getCell(meta, found.row, ["Attachments"], 16, "")),
         attachmentDataMeta
@@ -1014,7 +1132,7 @@ function editKaramayClaim(data) {
         return { success: false, message: "Please upload the death certificate and valid ID attachments." };
       }
 
-      const stagedAttachments = stageKaramayAttachmentsInSheet(data.request_id, merged);
+      const stagedAttachments = stageKaramayAttachmentsInDrive(data.request_id, merged, existingAttachments);
 
       const updates = {
         MemberName: data.memberName || "",
@@ -1037,7 +1155,8 @@ function editKaramayClaim(data) {
       };
 
       setObjectFieldsAtomic(meta.sheet, found.rowNumber, meta, found.row, updates);
-      cleanupOldKaramayAttachmentChunks(data.request_id, stagedAttachments.storageIds);
+      SpreadsheetApp.flush();
+      // Retain legacy chunks and previous files for recovery; do not delete during a save.
       return { success: true };
     });
   } catch (err) {
@@ -1047,6 +1166,7 @@ function editKaramayClaim(data) {
 
 function createRequest(data) {
   try {
+    data.attachments = validateHospitalizationAttachments(data.attachments || []);
     if (!normalizeValue(data.branchid)) {
       return { success: false, message: "Your account does not have an assigned branch." };
     }
@@ -1133,6 +1253,7 @@ function createRequest(data) {
 
 function editRequest(data) {
   try {
+    if (data.attachments !== undefined) data.attachments = validateHospitalizationAttachments(data.attachments);
     return withScriptLock(function() {
       const meta = getSheetMetadata(SHEETS.claims, CLAIM_HEADERS);
       const found = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, data.request_id);

@@ -453,18 +453,72 @@ function readFileAsDataUrl(file) {
   });
 }
 
+const MAX_CLAIM_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+
+function attachmentUploadError(message) {
+  const error = new Error(message);
+  error.code = "ATTACHMENT_UPLOAD";
+  return error;
+}
+
+async function prepareClaimAttachment(file) {
+  if (!file.size) throw attachmentUploadError(file.name + " is empty. Choose another file.");
+  let upload = file;
+  let name = file.name;
+  // Compress still photos locally; PDFs and other documents retain their bytes.
+  if (/^image\/(jpeg|png|webp)$/i.test(file.type)) {
+    const url = URL.createObjectURL(file);
+    try {
+      const photo = await new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(attachmentUploadError("Cannot read " + file.name + ". Choose a valid image."));
+        image.src = url;
+      });
+      const canvas = document.createElement("canvas");
+      const context = canvas.getContext("2d");
+      if (!context) throw attachmentUploadError("Image compression is unavailable. Please try another browser.");
+      // Limit resizing/quality loss so scanned document text stays readable.
+      for (const longestEdge of [2400, 2000, 1600]) {
+        const scale = Math.min(1, longestEdge / Math.max(photo.naturalWidth, photo.naturalHeight));
+        canvas.width = Math.max(1, Math.round(photo.naturalWidth * scale));
+        canvas.height = Math.max(1, Math.round(photo.naturalHeight * scale));
+        context.fillStyle = "#ffffff";
+        context.fillRect(0, 0, canvas.width, canvas.height);
+        context.drawImage(photo, 0, 0, canvas.width, canvas.height);
+        for (const quality of [0.85, 0.75]) {
+          const compressed = await new Promise(resolve => canvas.toBlob(resolve, "image/jpeg", quality));
+          if (compressed && compressed.size > 0 && compressed.size < upload.size) {
+            upload = compressed;
+            name = file.name.replace(/\.[^.]+$/, "") + (compressed.type === "image/jpeg" ? ".jpg" : ".png");
+          }
+          if (upload.size <= MAX_CLAIM_ATTACHMENT_BYTES) break;
+        }
+        if (upload.size <= MAX_CLAIM_ATTACHMENT_BYTES) break;
+      }
+      canvas.width = canvas.height = 0;
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+  }
+  if (upload.size > MAX_CLAIM_ATTACHMENT_BYTES) {
+    throw attachmentUploadError(file.name + " exceeds the 2 MB limit per attachment. Choose a smaller file or reduce its size before uploading.");
+  }
+  return {
+    file_name: name,
+    file_type: upload.type || "application/octet-stream",
+    file_size: upload.size,
+    file_data: await readFileAsDataUrl(upload)
+  };
+}
+
 async function readRequestAttachments(inputId = "requestAttachments") {
   const input = document.getElementById(inputId);
   const files = input && input.files ? Array.from(input.files) : [];
-
-  if (!files.length) return [];
-
-  return Promise.all(files.map(async file => ({
-    file_name: file.name,
-    file_type: file.type || "application/octet-stream",
-    file_size: file.size,
-    file_data: await readFileAsDataUrl(file)
-  })));
+  const attachments = [];
+  // Process sequentially to avoid decoding multiple large photos at once.
+  for (const file of files) attachments.push(await prepareClaimAttachment(file));
+  return attachments;
 }
 
 function getKaramayAttachmentDocumentType(attachment, index = -1) {
@@ -1651,6 +1705,7 @@ let tellerMemberDiagnostics = {};
 let allKaramayClaims = [KARAMAY_CLAIM_HEADERS];
 let karamayClaimsPromise = null;
 let editingKaramayClaimId = null;
+let karamaySubmissionId = null;
 let editingKaramayClaimAttachments = [];
 let isRequestSubmitting = false;
 let requestSubmissionId = null;
@@ -2573,7 +2628,7 @@ async function submitRequest() {
     await submitRequestOnce();
   } catch (err) {
     console.error("Claim submission failed:", err);
-    alert("Unable to submit the claim. Please check your connection and try again.");
+    alert(err.code === "ATTACHMENT_UPLOAD" ? err.message : "Unable to submit the claim. Please check your connection and try again.");
   } finally {
     isRequestSubmitting = false;
     if (submitButton) {
@@ -5165,6 +5220,7 @@ function sortKaramayClaimsNewestFirst(data) {
 }
 
 function resetKaramayClaimForm() {
+  karamaySubmissionId = null;
   editingKaramayClaimId = null;
   editingKaramayClaimAttachments = [];
 
@@ -5210,7 +5266,7 @@ async function submitKaramayClaim() {
     await submitKaramayClaimOnce();
   } catch (err) {
     console.error("Karamay claim submission failed:", err);
-    alert("Unable to submit the Karamay claim. Please check your connection and try again.");
+    alert(err.code === "ATTACHMENT_UPLOAD" ? err.message : "Unable to submit the Karamay claim. Please check your connection and try again.");
   } finally {
     isKaramayClaimSubmitting = false;
     if (submitButton) {
@@ -5233,7 +5289,8 @@ async function submitKaramayClaimOnce() {
   const attachmentsToSend = isEdit
     ? mergeKaramayAttachments(editingKaramayClaimAttachments, attachments)
     : normalizeKaramayAttachments(attachments);
-  const savedRequestId = isEdit ? editingKaramayClaimId : generateID("KRM");
+  if (!isEdit) karamaySubmissionId = karamaySubmissionId || generateID("KRM");
+  const savedRequestId = isEdit ? editingKaramayClaimId : karamaySubmissionId;
   const payload = {
     action: isEdit ? "editKaramayClaim" : "createKaramayClaim",
     request_id: savedRequestId,
