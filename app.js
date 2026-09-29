@@ -2628,7 +2628,7 @@ async function submitRequest() {
     await submitRequestOnce();
   } catch (err) {
     console.error("Claim submission failed:", err);
-    alert(err.code === "ATTACHMENT_UPLOAD" ? err.message : "Unable to submit the claim. Please check your connection and try again.");
+    alert(err.code === "ATTACHMENT_UPLOAD" ? err.message : (err.message || "Unable to submit the claim. Please check your connection and try again."));
   } finally {
     isRequestSubmitting = false;
     if (submitButton) {
