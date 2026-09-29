@@ -8,13 +8,14 @@ Both claim forms use the same upload preparation in `app.js`.
 - Stored filenames, MIME types, and byte sizes describe the compressed output. A smaller original file is retained instead of a larger re-encoded version.
 - Empty files and unreadable supported images are rejected. Forms display the size rule and file-specific errors.
 - The Apps Script backend independently validates Base64 payload size for hospitalization create/edit and Karamay staging. Client-provided file_size does not determine acceptance.
+- Hospitalization and Karamay file contents are stored in private Google Drive folders; spreadsheet claim cells hold only small attachment metadata and Drive IDs. The attachment read actions hydrate those IDs after the existing claim access checks. Older hospitalization claims with inline attachment data remain readable.
 - Existing server-loaded Karamay attachments can be retained unchanged even when they exceed the new limit. New and replacement uploads must meet it. Hospitalization edits without new files leave the existing attachments untouched.
 
 ## Deploy
 
 Deploy the updated `GoogleAppsScript.gs` as a new version of the existing Apps Script deployment. Publish/serve the updated `app.js` and `teller.html`, then refresh the browser. No new permissions are needed for compression. Existing Drive setup and recovery requirements still apply.
 
-This change does not move hospitalization attachments out of the original spreadsheet or resolve its size/write failure. It is a per-file upload rule, not a guarantee that an inline hospitalization attachment will fit a spreadsheet cell.
+The first hospitalization save after deployment creates a private Drive folder and requires the deployment owner to authorize Drive access if the script has not used it before. The existing Apps Script manifest already includes the required Drive scope. Deploy the updated Apps Script as a new version; no spreadsheet migration is needed.
 
 ## Verification
 

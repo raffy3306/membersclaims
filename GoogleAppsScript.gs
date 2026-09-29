@@ -692,6 +692,7 @@ function getAttachmentInlineData(attachment) {
 }
 
 const MAX_CLAIM_ATTACHMENT_BYTES = 2 * 1024 * 1024;
+const HOSPITALIZATION_ATTACHMENT_FOLDER_PROPERTY = "HOSPITALIZATION_ATTACHMENT_FOLDER_ID";
 
 function decodeClaimAttachment(attachment, allowExistingOversize) {
   const name = String(attachment.file_name || attachment.name || "attachment");
@@ -719,6 +720,75 @@ function validateHospitalizationAttachments(attachments) {
   return attachments.map(function(attachment) {
     const decoded = decodeClaimAttachment(attachment, false);
     return Object.assign({}, attachment, {file_size: decoded.bytes.length, file_type: decoded.mimeType});
+  });
+}
+
+function getHospitalizationAttachmentFolder_() {
+  const properties = PropertiesService.getScriptProperties();
+  const folderId = properties.getProperty(HOSPITALIZATION_ATTACHMENT_FOLDER_PROPERTY);
+  if (folderId) return DriveApp.getFolderById(folderId);
+  const folder = DriveApp.createFolder("Members Claims - Hospitalization Attachments");
+  properties.setProperty(HOSPITALIZATION_ATTACHMENT_FOLDER_PROPERTY, folder.getId());
+  return folder;
+}
+
+function stageHospitalizationAttachmentsInDrive(claimId, attachments, trustedExistingAttachments) {
+  const prepared = (attachments || []).map(function(attachment) {
+    const unchangedExistingFile = (trustedExistingAttachments || []).some(function(saved) {
+      return saved.storage === "drive" && saved.drive_file_id &&
+        String(saved.file_name || saved.name || "attachment") === String(attachment.file_name || attachment.name || "attachment") &&
+        getAttachmentInlineData(saved) === getAttachmentInlineData(attachment);
+    });
+    return decodeClaimAttachment(attachment, unchangedExistingFile);
+  });
+  const createdFiles = [];
+  try {
+    const folder = getHospitalizationAttachmentFolder_();
+    const stored = prepared.map(function(item) {
+      const name = String(item.attachment.file_name || item.attachment.name || "attachment");
+      const existing = (trustedExistingAttachments || []).find(function(saved) {
+        return saved.storage === "drive" && saved.drive_file_id &&
+          String(saved.file_name || saved.name || "attachment") === name &&
+          getAttachmentInlineData(saved) === getAttachmentInlineData(item.attachment);
+      });
+      let file = existing ? DriveApp.getFileById(existing.drive_file_id) : null;
+      if (!file) {
+        const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,
+          String(claimId) + "\n" + name + "\n" + Utilities.base64Encode(item.bytes))
+          .map(function(value) { return ("0" + ((value + 256) % 256).toString(16)).slice(-2); }).join("");
+        const storageName = "HC-" + digest;
+        const matches = folder.getFilesByName(storageName);
+        file = matches.hasNext() ? matches.next() : null;
+        if (!file) {
+          file = folder.createFile(Utilities.newBlob(item.bytes, item.mimeType, storageName));
+          createdFiles.push(file);
+        }
+      }
+      return {
+        file_name: name,
+        file_type: item.mimeType,
+        file_size: item.bytes.length,
+        storage: "drive",
+        drive_file_id: file.getId()
+      };
+    });
+    return { attachments: stored };
+  } catch (err) {
+    createdFiles.forEach(function(file) {
+      try { file.setTrashed(true); } catch (cleanupError) { Logger.log("Could not remove staged hospitalization file: %s", file.getId()); }
+    });
+    throw err;
+  }
+}
+
+function hydrateHospitalizationAttachments(attachments) {
+  return (Array.isArray(attachments) ? attachments : []).map(function(attachment) {
+    const hydrated = JSON.parse(JSON.stringify(attachment || {}));
+    if (!getAttachmentInlineData(hydrated) && hydrated.storage === "drive" && hydrated.drive_file_id) {
+      const blob = DriveApp.getFileById(hydrated.drive_file_id).getBlob();
+      hydrated.file_data = "data:" + blob.getContentType() + ";base64," + Utilities.base64Encode(blob.getBytes());
+    }
+    return hydrated;
   });
 }
 
@@ -972,7 +1042,9 @@ function getRequestAttachments(requestId, user) {
     return {
       success: true,
       request_id: requestId,
-      attachments: parseAttachments(getCell(meta, found.row, ["Attachments", "HCAttachments"], 16, ""))
+      attachments: hydrateHospitalizationAttachments(
+        parseAttachments(getCell(meta, found.row, ["Attachments", "HCAttachments"], 16, ""))
+      )
     };
   } catch (err) {
     return { success: false, message: "Error: " + err.toString() };
@@ -1216,6 +1288,8 @@ function createRequest(data) {
         return { success: false, message: "This member already has the maximum of " + MAX_CLAIMS_PER_YEAR + " claims for " + claimYear + "." };
       }
 
+      const stagedAttachments = stageHospitalizationAttachmentsInDrive(claimId, data.attachments || []);
+
       appendObjectRow(meta.sheet, meta, {
         ClaimID: claimId,
         MemberName: member.name,
@@ -1233,7 +1307,7 @@ function createRequest(data) {
         BranchId: branch,
         Notes: "",
         FinanceCheckedBy: "",
-        Attachments: JSON.stringify(data.attachments || []),
+        Attachments: JSON.stringify(stagedAttachments.attachments),
         MemberID: member.id,
         Segmentation: member.segmentation,
         Branch: branchName,
@@ -1329,7 +1403,11 @@ function editRequest(data) {
       };
 
       if (Array.isArray(data.attachments) && data.attachments.length) {
-        updates.Attachments = JSON.stringify(data.attachments);
+        const existingAttachments = hydrateHospitalizationAttachments(
+          parseAttachments(getCell(meta, found.row, ["Attachments", "HCAttachments"], 16, ""))
+        );
+        const stagedAttachments = stageHospitalizationAttachmentsInDrive(data.request_id, data.attachments, existingAttachments);
+        updates.Attachments = JSON.stringify(stagedAttachments.attachments);
       }
 
       setObjectFields(meta.sheet, found.rowNumber, meta, updates);
