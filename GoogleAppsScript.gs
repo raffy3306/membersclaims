@@ -432,9 +432,11 @@ function getSheetByNameFlexible(spreadsheet, sheetName) {
 }
 
 function getSheet(sheetName, requiredHeaders) {
-  const karamaySheetId = sheetName === SHEETS.karamayClaims
-    ? PropertiesService.getScriptProperties().getProperty("KARAMAY_CLAIMS_SHEET_ID") : "";
-  const spreadsheet = karamaySheetId ? SpreadsheetApp.openById(karamaySheetId) : getSpreadsheet();
+  const properties = PropertiesService.getScriptProperties();
+  const activeSheetId = sheetName === SHEETS.karamayClaims
+    ? properties.getProperty("KARAMAY_CLAIMS_SHEET_ID")
+    : (sheetName === SHEETS.claims ? properties.getProperty("HOSPITALIZATION_CLAIMS_SHEET_ID") : "");
+  const spreadsheet = activeSheetId ? SpreadsheetApp.openById(activeSheetId) : getSpreadsheet();
   let sheet = getSheetByNameFlexible(spreadsheet, sheetName);
 
   if (!sheet) {
@@ -511,7 +513,7 @@ function setObjectFields(sheet, rowNumber, meta, valuesByHeader) {
   });
 }
 
-function appendObjectRow(sheet, meta, valuesByHeader) {
+function appendObjectRow(sheet, meta, valuesByHeader, keyHeader) {
   const row = meta.headers.map(function(header) {
     const sourceKey = normalizeHeaderName(header);
     let value = "";
@@ -527,7 +529,27 @@ function appendObjectRow(sheet, meta, valuesByHeader) {
     return value;
   });
 
-  sheet.appendRow(row);
+  const keyIndex = keyHeader ? meta.headerLookup[normalizeHeaderName(keyHeader)] : undefined;
+  let targetRow;
+  if (keyIndex !== undefined && keyIndex >= 0) {
+    const lastSheetRow = sheet.getLastRow();
+    if (lastSheetRow < 2) {
+      targetRow = 2;
+    } else {
+      const keyValues = sheet.getRange(2, keyIndex + 1, lastSheetRow - 1, 1).getValues();
+      let lastKeyOffset = -1;
+      for (let i = keyValues.length - 1; i >= 0; i--) {
+        if (normalizeValue(keyValues[i][0])) {
+          lastKeyOffset = i;
+          break;
+        }
+      }
+      targetRow = lastKeyOffset < 0 ? 2 : lastKeyOffset + 3;
+    }
+  } else {
+    targetRow = Math.max(sheet.getLastRow() + 1, 2);
+  }
+  sheet.getRange(targetRow, 1, 1, row.length).setValues([row]);
 }
 
 function findRowByValue(meta, candidates, fallbackIndex, value) {
@@ -633,6 +655,77 @@ function getKaramayAttachmentDataMeta() {
 }
 
 // Editor-only recovery; intentionally not exposed through dispatchAction.
+// Pause claim submissions/status changes and direct sheet edits before running.
+function recoverHospitalizationClaimsStorage() {
+  return withScriptLock(function() {
+    const properties = PropertiesService.getScriptProperties();
+    const activeId = properties.getProperty("HOSPITALIZATION_CLAIMS_SHEET_ID");
+    if (activeId) {
+      const active = SpreadsheetApp.openById(activeId);
+      if (!getSheetByNameFlexible(active, SHEETS.claims)) {
+        throw new Error("Configured Hospitalization spreadsheet has no Claims sheet. Recovery stopped.");
+      }
+      Logger.log("Hospitalization storage is already configured: %s", active.getUrl());
+      return active.getUrl();
+    }
+
+    const sourceBook = getSpreadsheet();
+    const source = getSheetByNameFlexible(sourceBook, SHEETS.claims);
+    if (!source) throw new Error("Original Claims sheet was not found. Nothing changed.");
+    const values = source.getDataRange().getValues();
+    if (!values.length || !values[0].length) throw new Error("Original Claims sheet is empty. Nothing changed.");
+    const headers = values[0].map(normalizeHeaderName);
+    const claimIdColumn = headers.indexOf("claimid");
+    const attachmentsColumn = headers.indexOf("attachments");
+    if (claimIdColumn < 0 || attachmentsColumn < 0) {
+      throw new Error("Original Claims headers are not recognized. Nothing changed.");
+    }
+
+    // Large historical Base64 values cannot be copied into a Sheets cell.
+    // Move those bytes to Drive first and copy only compact references.
+    const copyValues = values.map(function(row) { return row.slice(); });
+    let migratedAttachmentCount = 0;
+    for (let rowIndex = 1; rowIndex < values.length; rowIndex++) {
+      const rawAttachments = values[rowIndex][attachmentsColumn];
+      if (!rawAttachments) continue;
+      const parsedAttachments = parseAttachments(rawAttachments);
+      const needsMigration = parsedAttachments.some(function(attachment) {
+        return Boolean(getAttachmentInlineData(attachment));
+      });
+      if (!needsMigration) continue;
+      const claimId = normalizeValue(values[rowIndex][claimIdColumn]);
+      copyValues[rowIndex][attachmentsColumn] = migrateHospitalizationAttachmentsForRecovery_(claimId, parsedAttachments);
+      migratedAttachmentCount += parsedAttachments.length;
+    }
+
+    const targetBook = SpreadsheetApp.create("Members Claims - Hospitalization Records",
+      Math.max(copyValues.length + 100, 1000), Math.max(copyValues[0].length, CLAIM_HEADERS.length));
+    properties.setProperty("HOSPITALIZATION_RECOVERY_CANDIDATE_ID", targetBook.getId());
+    targetBook.setSpreadsheetTimeZone(sourceBook.getSpreadsheetTimeZone());
+    const target = targetBook.getSheets()[0];
+    target.setName(SHEETS.claims);
+    for (let offset = 0; offset < copyValues.length; offset += 100) {
+      const batch = copyValues.slice(offset, offset + 100);
+      target.getRange(offset + 1, 1, batch.length, values[0].length).setValues(batch);
+    }
+    SpreadsheetApp.flush();
+    const copied = target.getRange(1, 1, copyValues.length, copyValues[0].length).getValues();
+    if (JSON.stringify(copied) !== JSON.stringify(copyValues)) {
+      throw new Error("Recovery copy verification failed. Original storage is still active; candidate ID is in Script Properties.");
+    }
+    if (JSON.stringify(source.getDataRange().getValues()) !== JSON.stringify(values)) {
+      throw new Error("Original claims changed during recovery. Original storage is still active; retry with submissions paused.");
+    }
+    ensureHeaders(target, CLAIM_HEADERS);
+    SpreadsheetApp.flush();
+    properties.setProperty("HOSPITALIZATION_CLAIMS_SHEET_ID", targetBook.getId());
+    Logger.log("Verified %s Hospitalization data rows; migrated %s attachments to Drive. Active storage: %s",
+      values.length - 1, migratedAttachmentCount, targetBook.getUrl());
+    return targetBook.getUrl();
+  });
+}
+
+// Editor-only recovery; intentionally not exposed through dispatchAction.
 // Deploy this version and pause user submissions before running this function.
 function recoverKaramayClaimsStorage() {
   return withScriptLock(function() {
@@ -730,6 +823,49 @@ function getHospitalizationAttachmentFolder_() {
   const folder = DriveApp.createFolder("Members Claims - Hospitalization Attachments");
   properties.setProperty(HOSPITALIZATION_ATTACHMENT_FOLDER_PROPERTY, folder.getId());
   return folder;
+}
+
+function migrateHospitalizationAttachmentsForRecovery_(claimId, attachments) {
+  const sourceAttachments = parseAttachments(attachments);
+  if (!sourceAttachments.length) return "[]";
+
+  const folder = getHospitalizationAttachmentFolder_();
+  const stored = sourceAttachments.map(function(attachment) {
+    const inlineData = getAttachmentInlineData(attachment);
+    if (!inlineData) {
+      if (attachment.storage === "drive" && attachment.drive_file_id) {
+        return {
+          file_name: String(attachment.file_name || attachment.name || "attachment"),
+          file_type: String(attachment.file_type || attachment.type || "application/octet-stream"),
+          file_size: Number(attachment.file_size || attachment.size || 0),
+          storage: "drive",
+          drive_file_id: String(attachment.drive_file_id)
+        };
+      }
+      throw new Error("Claim " + claimId + " has an attachment without inline data or a Drive file reference.");
+    }
+
+    // Historical inline attachments predate the current per-file upload limit.
+    const decoded = decodeClaimAttachment(attachment, true);
+    const name = String(attachment.file_name || attachment.name || "attachment");
+    const digest = Utilities.computeDigest(Utilities.DigestAlgorithm.SHA_256,
+      String(claimId) + "\n" + name + "\n" + Utilities.base64Encode(decoded.bytes))
+      .map(function(value) { return ("0" + ((value + 256) % 256).toString(16)).slice(-2); }).join("");
+    const storageName = "HC-" + digest;
+    const matches = folder.getFilesByName(storageName);
+    const file = matches.hasNext()
+      ? matches.next()
+      : folder.createFile(Utilities.newBlob(decoded.bytes, decoded.mimeType, storageName));
+    return {
+      file_name: name,
+      file_type: decoded.mimeType,
+      file_size: decoded.bytes.length,
+      storage: "drive",
+      drive_file_id: file.getId()
+    };
+  });
+
+  return JSON.stringify(stored);
 }
 
 function stageHospitalizationAttachmentsInDrive(claimId, attachments, trustedExistingAttachments) {
@@ -1237,13 +1373,16 @@ function editKaramayClaim(data) {
 }
 
 function createRequest(data) {
+  let saveStage = "validating hospitalization attachments";
   try {
     data.attachments = validateHospitalizationAttachments(data.attachments || []);
     if (!normalizeValue(data.branchid)) {
       return { success: false, message: "Your account does not have an assigned branch." };
     }
     return withScriptLock(function() {
+      saveStage = "opening the Claims sheet";
       const meta = getSheetMetadata(SHEETS.claims, CLAIM_HEADERS);
+      saveStage = "checking member, hospital, and claim eligibility";
       const references = getTrustedHospitalizationReferences(data);
       if (!references.success) return references;
       const member = references.member;
@@ -1288,8 +1427,10 @@ function createRequest(data) {
         return { success: false, message: "This member already has the maximum of " + MAX_CLAIMS_PER_YEAR + " claims for " + claimYear + "." };
       }
 
+      saveStage = "saving hospitalization attachments to Drive";
       const stagedAttachments = stageHospitalizationAttachmentsInDrive(claimId, data.attachments || []);
 
+      saveStage = "appending the hospitalization claim row";
       appendObjectRow(meta.sheet, meta, {
         ClaimID: claimId,
         MemberName: member.name,
@@ -1316,19 +1457,24 @@ function createRequest(data) {
         DateDischarged: data.dateDischarged || "",
         ActualDaysConfined: actualDaysConfined,
         Diagnosis: firstPresent(data.diagnosis, data.purpose)
-      });
+      }, "ClaimID");
 
+      saveStage = "flushing the hospitalization claim row";
+      SpreadsheetApp.flush();
       return { success: true, request_id: claimId, claimID: claimId };
     });
   } catch (err) {
-    return { success: false, message: "Error: " + err.toString() };
+    console.error("createRequest failed while " + saveStage + ":", err);
+    return { success: false, message: "Unable to save hospitalization claim while " + saveStage + ": " + err.toString() };
   }
 }
 
 function editRequest(data) {
+  let saveStage = "validating hospitalization attachments";
   try {
     if (data.attachments !== undefined) data.attachments = validateHospitalizationAttachments(data.attachments);
     return withScriptLock(function() {
+      saveStage = "opening the Claims sheet";
       const meta = getSheetMetadata(SHEETS.claims, CLAIM_HEADERS);
       const found = findRowByValue(meta, ["ClaimID", "Claim ID", "ID", "RequestID"], 0, data.request_id);
 
@@ -1403,18 +1549,24 @@ function editRequest(data) {
       };
 
       if (Array.isArray(data.attachments) && data.attachments.length) {
+        saveStage = "reading existing hospitalization attachments";
         const existingAttachments = hydrateHospitalizationAttachments(
           parseAttachments(getCell(meta, found.row, ["Attachments", "HCAttachments"], 16, ""))
         );
+        saveStage = "saving hospitalization attachments to Drive";
         const stagedAttachments = stageHospitalizationAttachmentsInDrive(data.request_id, data.attachments, existingAttachments);
         updates.Attachments = JSON.stringify(stagedAttachments.attachments);
       }
 
+      saveStage = "updating the hospitalization claim row";
       setObjectFields(meta.sheet, found.rowNumber, meta, updates);
+      saveStage = "flushing the hospitalization claim row";
+      SpreadsheetApp.flush();
       return { success: true };
     });
   } catch (err) {
-    return { success: false, message: "Error: " + err.toString() };
+    console.error("editRequest failed while " + saveStage + ":", err);
+    return { success: false, message: "Unable to update hospitalization claim while " + saveStage + ": " + err.toString() };
   }
 }
 

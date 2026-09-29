@@ -1,4 +1,4 @@
-const API = "https://script.google.com/macros/s/AKfycbzAtnTO0I81Qp5i1cYmZEfv9wJoMhgJlzt1KlFLm7NcB46M8_V8Wbid58rtQKyHM_f9VA/exec";
+const API = "https://script.google.com/macros/s/AKfycbx3yBb2kuFVWHMPpBHL8cHdIz4uO3WibwaH6xDZEwM9pUpLU5V7SXzFcUtPKZKTeqJfYQ/exec";
 // Apps Script web apps reject CORS preflight OPTIONS requests, so POST JSON as plain text.
 const APPS_SCRIPT_JSON_HEADERS = { "Content-Type": "text/plain;charset=utf-8" };
 
@@ -2628,7 +2628,7 @@ async function submitRequest() {
     await submitRequestOnce();
   } catch (err) {
     console.error("Claim submission failed:", err);
-    alert(err.code === "ATTACHMENT_UPLOAD" ? err.message : "Unable to submit the claim. Please check your connection and try again.");
+    alert(err.code === "ATTACHMENT_UPLOAD" ? err.message : (err.message || "Unable to submit the claim. Please check your connection and try again."));
   } finally {
     isRequestSubmitting = false;
     if (submitButton) {
