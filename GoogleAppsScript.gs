@@ -89,6 +89,8 @@ const USER_HEADERS = [
   "MustChangePassword"
 ];
 
+const USERS_STORAGE_PROPERTY = "USERS_SHEET_ID";
+
 const MEMBER_HEADERS = [
   "MemberID",
   "FullName",
@@ -433,9 +435,10 @@ function getSheetByNameFlexible(spreadsheet, sheetName) {
 
 function getSheet(sheetName, requiredHeaders) {
   const properties = PropertiesService.getScriptProperties();
-  const activeSheetId = sheetName === SHEETS.karamayClaims
-    ? properties.getProperty("KARAMAY_CLAIMS_SHEET_ID")
-    : (sheetName === SHEETS.claims ? properties.getProperty("HOSPITALIZATION_CLAIMS_SHEET_ID") : "");
+  let activeSheetId = "";
+  if (sheetName === SHEETS.karamayClaims) activeSheetId = properties.getProperty("KARAMAY_CLAIMS_SHEET_ID");
+  else if (sheetName === SHEETS.claims) activeSheetId = properties.getProperty("HOSPITALIZATION_CLAIMS_SHEET_ID");
+  else if (sheetName === SHEETS.users) activeSheetId = properties.getProperty(USERS_STORAGE_PROPERTY);
   const spreadsheet = activeSheetId ? SpreadsheetApp.openById(activeSheetId) : getSpreadsheet();
   let sheet = getSheetByNameFlexible(spreadsheet, sheetName);
 
@@ -652,6 +655,58 @@ function hasRequiredKaramayAttachments(attachments) {
 
 function getKaramayAttachmentDataMeta() {
   return getSheetMetadata(SHEETS.karamayAttachmentData, KARAMAY_ATTACHMENT_DATA_HEADERS);
+}
+
+// Editor-only migration. Copies stored password values exactly, verifies the
+// destination and confirms the source stayed unchanged before routing Users.
+function recoverUsersStorage() {
+  return withScriptLock(function() {
+    const properties = PropertiesService.getScriptProperties();
+    const activeId = properties.getProperty(USERS_STORAGE_PROPERTY);
+    if (activeId) {
+      const active = SpreadsheetApp.openById(activeId);
+      if (!getSheetByNameFlexible(active, SHEETS.users)) {
+        throw new Error("Configured Users spreadsheet has no Users sheet. Recovery stopped.");
+      }
+      Logger.log("Users storage is already configured: %s", active.getUrl());
+      return active.getUrl();
+    }
+
+    const sourceBook = getSpreadsheet();
+    const source = getSheetByNameFlexible(sourceBook, SHEETS.users);
+    if (!source) throw new Error("Original Users sheet was not found. Nothing changed.");
+    const values = source.getDataRange().getValues();
+    if (!values.length || !values[0].length) throw new Error("Original Users sheet is empty. Nothing changed.");
+    const headers = values[0].map(normalizeHeaderName);
+    if (headers.indexOf("email") < 0 || headers.indexOf("password") < 0) {
+      throw new Error("Original Users headers are not recognized. Nothing changed.");
+    }
+
+    const targetBook = SpreadsheetApp.create("Members Claims - User Accounts",
+      Math.max(values.length + 100, 1000), Math.max(values[0].length, USER_HEADERS.length));
+    properties.setProperty("USERS_RECOVERY_CANDIDATE_ID", targetBook.getId());
+    targetBook.setSpreadsheetTimeZone(sourceBook.getSpreadsheetTimeZone());
+    const target = targetBook.getSheets()[0];
+    target.setName(SHEETS.users);
+    for (let offset = 0; offset < values.length; offset += 100) {
+      const batch = values.slice(offset, offset + 100);
+      target.getRange(offset + 1, 1, batch.length, values[0].length).setValues(batch);
+    }
+    SpreadsheetApp.flush();
+    const copied = target.getRange(1, 1, values.length, values[0].length).getValues();
+    if (JSON.stringify(copied) !== JSON.stringify(values)) {
+      throw new Error("Users recovery copy verification failed. Original storage is still active; candidate ID is in Script Properties.");
+    }
+    if (JSON.stringify(source.getDataRange().getValues()) !== JSON.stringify(values)) {
+      throw new Error("Original Users changed during recovery. Original storage is still active; retry while user administration is paused.");
+    }
+
+    ensureHeaders(target, USER_HEADERS);
+    SpreadsheetApp.flush();
+    properties.setProperty(USERS_STORAGE_PROPERTY, targetBook.getId());
+    Logger.log("Verified %s user records. Active storage: %s", values.length - 1, targetBook.getUrl());
+    return targetBook.getUrl();
+  });
 }
 
 // Editor-only recovery; intentionally not exposed through dispatchAction.
@@ -2099,9 +2154,11 @@ function getUsers() {
 }
 
 function createUser(data) {
+  let saveStage = "validating user data";
   try {
     getPasswordPepper();
     return withScriptLock(function() {
+      saveStage = "opening the Users sheet";
       const meta = getSheetMetadata(SHEETS.users, USER_HEADERS);
       const email = normalizeEmail(data.email);
       const password = normalizeValue(data.password);
@@ -2122,6 +2179,7 @@ function createUser(data) {
         return { success: false, message: "A user with this email already exists." };
       }
 
+      saveStage = "appending the user row";
       appendObjectRow(meta.sheet, meta, {
         Email: email,
         Password: hashPassword(password),
@@ -2133,17 +2191,22 @@ function createUser(data) {
         MustChangePassword: firstLogin
       });
 
+      saveStage = "flushing the Users sheet";
+      SpreadsheetApp.flush();
       return { success: true };
     });
   } catch (err) {
-    return { success: false, message: "Error: " + err.toString() };
+    console.error("createUser failed while " + saveStage + ":", err);
+    return { success: false, message: "Unable to create user while " + saveStage + ": " + err.toString() };
   }
 }
 
 function updateUser(data) {
+  let saveStage = "validating user data";
   try {
     if (data.password) getPasswordPepper();
     return withScriptLock(function() {
+      saveStage = "opening the Users sheet";
       const meta = getSheetMetadata(SHEETS.users, USER_HEADERS);
       const originalEmail = normalizeEmail(data.originalEmail);
       const email = normalizeEmail(data.email);
@@ -2185,13 +2248,18 @@ function updateUser(data) {
         updates.MustChangePassword = true;
       }
 
+      saveStage = "updating the user row";
       setObjectFields(meta.sheet, found.rowNumber, meta, updates);
+      saveStage = "flushing the Users sheet";
+      SpreadsheetApp.flush();
+      saveStage = "revoking existing user sessions";
       revokeSessionsForEmail(originalEmail);
       if (email !== originalEmail) revokeSessionsForEmail(email);
       return { success: true };
     });
   } catch (err) {
-    return { success: false, message: "Error: " + err.toString() };
+    console.error("updateUser failed while " + saveStage + ":", err);
+    return { success: false, message: "Unable to update user while " + saveStage + ": " + err.toString() };
   }
 }
 

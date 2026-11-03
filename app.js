@@ -1887,9 +1887,52 @@ function openFirstLoginPasswordModal(email) {
   if (currentPasswordInput && pendingLoginData) currentPasswordInput.value = pendingLoginData.currentPassword || "";
   if (newPasswordInput) newPasswordInput.value = "";
   if (confirmPasswordInput) confirmPasswordInput.value = "";
+  setFirstLoginPasswordSaving(false);
+  clearFirstLoginPasswordValidation();
 
   modal.classList.add("active");
   return true;
+}
+
+function clearFirstLoginPasswordValidation() {
+  const error = document.getElementById("firstLoginPasswordError");
+  if (error) {
+    error.textContent = "";
+    error.classList.remove("visible");
+  }
+  ["currentPassword", "newPassword", "confirmPassword"].forEach(function(id) {
+    const input = document.getElementById(id);
+    if (!input) return;
+    input.removeAttribute("aria-invalid");
+    input.classList.remove("password-field-invalid");
+  });
+}
+
+function showFirstLoginPasswordValidation(message, fieldIds) {
+  const error = document.getElementById("firstLoginPasswordError");
+  if (error) {
+    error.textContent = message;
+    error.classList.add("visible");
+  }
+  (fieldIds || []).forEach(function(id) {
+    const input = document.getElementById(id);
+    if (!input) return;
+    input.setAttribute("aria-invalid", "true");
+    input.classList.add("password-field-invalid");
+  });
+  const firstInvalid = fieldIds && fieldIds.length ? document.getElementById(fieldIds[0]) : null;
+  if (firstInvalid && typeof firstInvalid.focus === "function") firstInvalid.focus();
+}
+
+function setFirstLoginPasswordSaving(isSaving) {
+  const button = document.getElementById("firstLoginPasswordSubmit");
+  if (!button) return;
+  button.disabled = Boolean(isSaving);
+  button.classList.toggle("is-saving", Boolean(isSaving));
+  button.innerHTML = isSaving
+    ? '<span class="password-save-spinner" aria-hidden="true"></span>Saving Password...'
+    : "Update Password";
+  button.setAttribute("aria-busy", isSaving ? "true" : "false");
 }
 
 function closeFirstLoginPasswordModal() {
@@ -1910,32 +1953,41 @@ async function submitFirstLoginPasswordChange() {
   const newPassword = newPasswordInput ? newPasswordInput.value : "";
   const confirmPassword = confirmPasswordInput ? confirmPasswordInput.value : "";
 
+  clearFirstLoginPasswordValidation();
+
+  if (document.getElementById("firstLoginPasswordSubmit")?.disabled) return;
+
   if (!pendingLoginData) {
-    alert("Please sign in again to continue.");
+    showFirstLoginPasswordValidation("Your sign-in session expired. Please sign in again.", []);
     closeFirstLoginPasswordModal();
     return;
   }
 
   if (!currentPassword || !newPassword || !confirmPassword) {
-    alert("Please complete all password fields.");
+    const missing = [];
+    if (!currentPassword) missing.push("currentPassword");
+    if (!newPassword) missing.push("newPassword");
+    if (!confirmPassword) missing.push("confirmPassword");
+    showFirstLoginPasswordValidation("Complete all password fields to continue.", missing);
     return;
   }
 
   if (newPassword.length < 8) {
-    alert("Your new password must be at least 8 characters long.");
+    showFirstLoginPasswordValidation("Your new password must be at least 8 characters long.", ["newPassword"]);
     return;
   }
 
   if (newPassword !== confirmPassword) {
-    alert("New password and confirmation do not match.");
+    showFirstLoginPasswordValidation("New password and confirmation do not match.", ["confirmPassword"]);
     return;
   }
 
   if (newPassword === currentPassword) {
-    alert("Your new password must be different from your current password.");
+    showFirstLoginPasswordValidation("Your new password must be different from your current password.", ["newPassword"]);
     return;
   }
 
+  setFirstLoginPasswordSaving(true);
   try {
     const res = await fetchWithTimeout(
       API,
@@ -1954,7 +2006,7 @@ async function submitFirstLoginPasswordChange() {
     const data = await parseApiJsonResponse(res);
 
     if (!data.success) {
-      alert(data.message || "Unable to change password.");
+      showFirstLoginPasswordValidation(data.message || "Unable to change password. Please review your details and try again.", []);
       return;
     }
 
@@ -1973,7 +2025,9 @@ async function submitFirstLoginPasswordChange() {
     }
   } catch (err) {
     console.error(err);
-    alert(err.message || "Connection error. Check your Google Apps Script deployment and internet connection.");
+    showFirstLoginPasswordValidation(err.message || "Connection error while saving your password. Please try again.", []);
+  } finally {
+    setFirstLoginPasswordSaving(false);
   }
 }
 
@@ -4720,7 +4774,7 @@ async function submitUserForm() {
     loadUsers();
   } catch (err) {
     console.error('Failed to save user', err);
-    alert('Failed to save user.');
+    alert(err.message || 'Failed to save user.');
   } finally {
     if (isUserSaving) setUserFormSaving(false, isEditing);
   }
