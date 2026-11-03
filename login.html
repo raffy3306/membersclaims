@@ -57,9 +57,10 @@
         <label for="confirmPassword">Confirm New Password</label>
         <input id="confirmPassword" class="form-control" type="password" placeholder="Re-enter your new password">
       </div>
+      <div id="firstLoginPasswordError" class="password-validation-error" role="alert" aria-live="polite"></div>
     </div>
     <div class="modal-footer">
-      <button class="btn blue" onclick="submitFirstLoginPasswordChange()">Update Password</button>
+      <button id="firstLoginPasswordSubmit" class="btn blue" onclick="submitFirstLoginPasswordChange()">Update Password</button>
     </div>
   </div>
 </div>

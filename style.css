@@ -581,6 +581,54 @@ tbody tr:last-child td {
   animation: user-save-spin 700ms linear infinite;
 }
 
+.password-validation-error {
+  display: none;
+  margin-top: 12px;
+  padding: 9px 11px;
+  border: 1px solid #fecaca;
+  border-radius: 7px;
+  background: #fef2f2;
+  color: #b91c1c;
+  font-size: 13px;
+  line-height: 1.4;
+}
+
+.password-validation-error.visible {
+  display: block;
+  animation: password-error-in 160ms ease-out;
+}
+
+.password-field-invalid {
+  border-color: #dc2626 !important;
+  box-shadow: 0 0 0 2px rgba(220, 38, 38, 0.12);
+}
+
+.password-save-spinner {
+  width: 15px;
+  height: 15px;
+  flex: 0 0 15px;
+  border: 2px solid rgba(255, 255, 255, 0.45);
+  border-top-color: #fff;
+  border-radius: 50%;
+  animation: password-save-spin 700ms linear infinite;
+}
+
+@keyframes password-save-spin {
+  to { transform: rotate(360deg); }
+}
+
+@keyframes password-error-in {
+  from { opacity: 0; transform: translateY(-3px); }
+  to { opacity: 1; transform: translateY(0); }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .password-save-spinner,
+  .password-validation-error.visible {
+    animation: none;
+  }
+}
+
 @keyframes user-save-spin {
   to { transform: rotate(360deg); }
 }

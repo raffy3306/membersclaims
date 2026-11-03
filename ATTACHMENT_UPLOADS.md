@@ -15,7 +15,7 @@ Both claim forms use the same upload preparation in `app.js`.
 
 Deploy the updated `GoogleAppsScript.gs` as a new version of the existing Apps Script deployment. Publish/serve the updated `app.js` and `teller.html`, then refresh the browser. No new permissions are needed for compression. Existing Drive setup and recovery requirements still apply.
 
-The first hospitalization save after deployment creates a private Drive folder and requires the deployment owner to authorize Drive access if the script has not used it before. The existing Apps Script manifest already includes the required Drive scope. Deploy the updated Apps Script as a new version; no spreadsheet migration is needed.
+The first hospitalization save after deployment creates a private Drive folder and requires the deployment owner to authorize Drive access if the script has not used it before. The existing Apps Script manifest already includes the required Drive scope. If writes to the original `Claims` sheet fail with a document modification or size error, deploy the updated Apps Script, pause claim writes, then run `recoverHospitalizationClaimsStorage` from the Apps Script editor as the deployment owner. The function copies and verifies existing `Claims` values in a clean spreadsheet before routing claim reads and writes there. The original sheet is retained unchanged.
 
 ## Verification
 
