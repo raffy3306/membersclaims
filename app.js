@@ -575,7 +575,7 @@ function hasRequiredKaramayAttachments(attachments, intermentDate, today = new D
   const required = ["Death Certificate", "Beneficiary Valid ID"];
   const interment = intermentDate ? new Date(`${String(intermentDate).slice(0, 10)}T00:00:00`) : null;
   const current = new Date(today.getFullYear(), today.getMonth(), today.getDate());
-  if (interment && !Number.isNaN(interment.getTime()) && current > interment) required.push("Letter of Consideration");
+  if (interment && !Number.isNaN(interment.getTime()) && Math.floor((current - interment) / 86400000) > 30) required.push("Letter of Consideration");
   return required.every(type => types.includes(type));
 }
 
@@ -690,7 +690,7 @@ function validateKaramayForm() {
   if (!hasDocument("karamayDeathCertificate", "Death Certificate")) errors.push("Attach the death certificate.");
   if (!hasDocument("karamayValidId", "Beneficiary Valid ID")) errors.push("Attach the beneficiary/requestor's valid ID.");
   const interment = intermentDate ? new Date(`${intermentDate}T00:00:00`) : null;
-  if (interment && !Number.isNaN(interment.getTime()) && today > interment && !hasDocument("karamayLetterOfConsideration", "Letter of Consideration")) errors.push("Attach the Letter of Consideration because the request is being made after the interment date.");
+  if (interment && !Number.isNaN(interment.getTime()) && Math.floor((today - interment) / 86400000) > 30 && !hasDocument("karamayLetterOfConsideration", "Letter of Consideration")) errors.push("Attach the Letter of Consideration because the request is being made more than 30 days after the interment date.");
   showFormValidationMessage("karamayFormValidation", errors);
   return errors.length === 0;
 }
@@ -703,7 +703,8 @@ function updateKaramayReleaseModeOptions() {
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
   const hasSavedLetter = editingKaramayClaimAttachments.some(file => getKaramayAttachmentDocumentType(file) === "Letter of Consideration");
-  const needed = Boolean((interment && !Number.isNaN(interment.getTime()) && today > interment) || hasSavedLetter);
+  const daysSinceInterment = interment && !Number.isNaN(interment.getTime()) ? Math.floor((today - interment) / 86400000) : -1;
+  const needed = Boolean(daysSinceInterment > 30 || hasSavedLetter);
   if (container) container.style.display = needed ? "block" : "none";
   if (input && !needed && !editingKaramayClaimAttachments.some(file => getKaramayAttachmentDocumentType(file) === "Letter of Consideration")) input.value = "";
 }
@@ -1016,7 +1017,7 @@ async function supabaseCreateKaramayClaim(data) {
   if (!Array.isArray(request.attachments) || request.attachments.length < 2) {
     return { success: false, message: "Please upload the death certificate and valid ID attachments." };
   }
-  if (!hasRequiredKaramayAttachments(request.attachments, request.interment_date)) return { success: false, message: "Please upload the Letter of Consideration for requests made after interment." };
+  if (!hasRequiredKaramayAttachments(request.attachments, request.interment_date)) return { success: false, message: "Please upload the Letter of Consideration for requests made more than 30 days after interment." };
 
     const { data: existingClaim, error: existingClaimError } = await db
     .from(SUPABASE_TABLES.karamayClaims)
@@ -1083,7 +1084,7 @@ async function supabaseEditKaramayClaim(data) {
   };
   const existingAttachments = Array.isArray(existing.attachments) ? existing.attachments : [];
   updates.attachments = mergeKaramayAttachments(existingAttachments, updates.attachments);
-  if (!hasRequiredKaramayAttachments(updates.attachments, updates.interment_date)) return { success: false, message: "Please upload the Letter of Consideration for requests made after interment." };
+  if (!hasRequiredKaramayAttachments(updates.attachments, updates.interment_date)) return { success: false, message: "Please upload the Letter of Consideration for requests made more than 30 days after interment." };
 
   const { error } = await db
     .from(SUPABASE_TABLES.karamayClaims)
@@ -5485,7 +5486,7 @@ async function submitKaramayClaimOnce() {
   };
 
   if (!hasRequiredKaramayAttachments(attachmentsToSend, payload.intermentDate)) {
-    showFormValidationMessage("karamayFormValidation", ["Attach the death certificate and beneficiary/requestor's valid ID. A Letter of Consideration is also required for requests made after interment."]);
+    showFormValidationMessage("karamayFormValidation", ["Attach the death certificate and beneficiary/requestor's valid ID. A Letter of Consideration is also required for requests made more than 30 days after interment."]);
     return;
   }
 
