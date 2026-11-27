@@ -535,6 +535,8 @@ function getKaramayAttachmentDocumentType(attachment, index = -1) {
     return "Beneficiary Valid ID";
   }
 
+  if (normalizedType.includes("letter") && normalizedType.includes("consideration")) return "Letter of Consideration";
+
   if (explicitType) return explicitType;
   if (index === 0) return "Death Certificate";
   if (index === 1) return "Beneficiary Valid ID";
@@ -566,11 +568,15 @@ function mergeKaramayAttachments(existingAttachments, replacementAttachments) {
   return Array.from(merged.values());
 }
 
-function hasRequiredKaramayAttachments(attachments) {
+function hasRequiredKaramayAttachments(attachments, intermentDate, today = new Date()) {
   const types = normalizeKaramayAttachments(attachments).map(function(attachment, index) {
     return getKaramayAttachmentDocumentType(attachment, index);
   });
-  return types.includes("Death Certificate") && types.includes("Beneficiary Valid ID");
+  const required = ["Death Certificate", "Beneficiary Valid ID"];
+  const interment = intermentDate ? new Date(`${String(intermentDate).slice(0, 10)}T00:00:00`) : null;
+  const current = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  if (interment && !Number.isNaN(interment.getTime()) && current > interment) required.push("Letter of Consideration");
+  return required.every(type => types.includes(type));
 }
 
 function calculateHospitalDays(dateAdmitted, dateDischarged) {
@@ -593,6 +599,115 @@ function calculateHospitalDays(dateAdmitted, dateDischarged) {
   };
 }
 
+function isClaimPastDeadline(eventDate, allowedDays, today = new Date()) {
+  if (!eventDate) return false;
+  const event = new Date(`${String(eventDate).slice(0, 10)}T00:00:00`);
+  const current = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  return !Number.isNaN(event.getTime()) && Math.floor((current - event) / 86400000) > allowedDays;
+}
+
+function getKaramayReleaseMode(intermentDate, today = new Date()) {
+  const eventDate = intermentDate ? new Date(`${String(intermentDate).slice(0, 10)}T00:00:00`) : null;
+  const currentDate = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  if (eventDate && !Number.isNaN(eventDate.getTime()) && eventDate > currentDate) {
+    return "Actual Delivery (Bouquet and Cash)";
+  }
+  return "Actual Delivery (Bouquet and Cash)";
+}
+
+function showFormValidationMessage(elementId, messages) {
+  const element = document.getElementById(elementId);
+  if (!element) return;
+  element.innerHTML = messages.length
+    ? `<strong>Please correct the following:</strong><ul style="margin:6px 0 0 18px; padding:0;">${messages.map(message => `<li>${escapeHtml(message)}</li>`).join("")}</ul>`
+    : "";
+  element.style.display = messages.length ? "block" : "none";
+  element.style.background = "#fff7ed";
+  element.style.border = "1px solid #fdba74";
+  element.style.color = "#9a3412";
+}
+
+function validateHospitalizationForm() {
+  const errors = [];
+  const member = getSelectedRequestMember();
+  const hospitalId = document.getElementById("requestHospital")?.value || "";
+  const hospital = allHospitals.find(item => String(item.id) === String(hospitalId));
+  const admitted = document.getElementById("requestDateAdmitted")?.value || "";
+  const discharged = document.getElementById("requestDateDischarged")?.value || "";
+  const days = calculateHospitalDays(admitted, discharged);
+  const dailyRate = getDailyRateForSegmentation(member?.segmentation || "");
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  const admissionDate = admitted ? new Date(`${admitted}T00:00:00`) : null;
+  const dischargeDate = discharged ? new Date(`${discharged}T00:00:00`) : null;
+
+  if (document.getElementById("requestMember")?.value.trim() && !member) errors.push("Select a member from the matching member list.");
+  else if (!member) errors.push("Select a member.");
+  if (!hospital) errors.push("Select a hospital.");
+  if (!admitted) errors.push("Enter the admission date.");
+  if (!discharged) errors.push("Enter the discharge date.");
+  if (admissionDate && !Number.isNaN(admissionDate.getTime()) && admissionDate > today) errors.push("Admission date cannot be in the future.");
+  if (dischargeDate && !Number.isNaN(dischargeDate.getTime()) && dischargeDate > today) errors.push("Discharge date cannot be in the future.");
+  if (admitted && discharged && days.actualDays <= 0) errors.push("Discharge date must be after admission date.");
+  if (days.actualDays > 0 && days.actualDays < MIN_ELIGIBLE_CONFINEMENT_DAYS) errors.push(`Hospital confinement must be at least ${MIN_ELIGIBLE_CONFINEMENT_DAYS} days.`);
+  const deadlineMessage = document.getElementById("requestDischargeDeadlineMessage");
+  const isPastFilingDeadline = discharged && isClaimPastDeadline(discharged, 90);
+  if (isPastFilingDeadline) errors.push("Hospitalization claims must be submitted within 90 days after discharge.");
+  if (deadlineMessage) {
+    deadlineMessage.textContent = isPastFilingDeadline
+      ? "This discharge date is more than 90 days ago. The request is outside the filing period."
+      : "";
+    deadlineMessage.style.display = isPastFilingDeadline ? "block" : "none";
+  }
+  if (member && !dailyRate) errors.push(`No daily rate is configured for ${member.segmentation || "this member's"} segmentation.`);
+  showFormValidationMessage("requestFormValidation", errors);
+  return errors.length === 0;
+}
+
+function validateKaramayForm() {
+  updateKaramayReleaseModeOptions();
+  const errors = [];
+  const value = id => document.getElementById(id)?.value?.trim() || "";
+  const deathDate = value("karamayDateOfDeath");
+  const intermentDate = value("karamayIntermentDate");
+  const today = new Date(); today.setHours(0, 0, 0, 0);
+  if (!value("karamayMemberName")) errors.push("Enter the deceased member's name.");
+  if (!value("karamayMemberBranchId")) errors.push("The member branch is missing. Check the account branch assignment.");
+  if (!value("karamayMemberAddress")) errors.push("Enter the deceased member's address.");
+  if (!deathDate) errors.push("Enter the date of death.");
+  if (!intermentDate) errors.push("Enter the interment date.");
+  const parsedDeathDate = deathDate ? new Date(`${deathDate}T00:00:00`) : null;
+  if (parsedDeathDate && !Number.isNaN(parsedDeathDate.getTime()) && parsedDeathDate > today) errors.push("Date of death cannot be in the future.");
+  if (!value("karamayBeneficiaryName")) errors.push("Enter the beneficiary or requestor's name.");
+  if (!value("karamayRelationship")) errors.push("Enter the beneficiary's relationship to the deceased.");
+  if (!value("karamayBeneficiaryAddress")) errors.push("Enter the beneficiary or requestor's address.");
+  if (!value("karamayContactNumber")) errors.push("Enter the beneficiary or requestor's contact number.");
+  const maxBytes = 2 * 1024 * 1024;
+  ["karamayDeathCertificate", "karamayValidId", "karamayLetterOfConsideration"].forEach(id => {
+    const files = Array.from(document.getElementById(id)?.files || []);
+    files.forEach(file => { if (file.size > maxBytes) errors.push(`${file.name} exceeds the 2 MB file size limit.`); });
+  });
+  const hasDocument = (inputId, type) => document.getElementById(inputId)?.files?.length || editingKaramayClaimAttachments.some(file => getKaramayAttachmentDocumentType(file) === type);
+  if (!hasDocument("karamayDeathCertificate", "Death Certificate")) errors.push("Attach the death certificate.");
+  if (!hasDocument("karamayValidId", "Beneficiary Valid ID")) errors.push("Attach the beneficiary/requestor's valid ID.");
+  const interment = intermentDate ? new Date(`${intermentDate}T00:00:00`) : null;
+  if (interment && !Number.isNaN(interment.getTime()) && today > interment && !hasDocument("karamayLetterOfConsideration", "Letter of Consideration")) errors.push("Attach the Letter of Consideration because the request is being made after the interment date.");
+  showFormValidationMessage("karamayFormValidation", errors);
+  return errors.length === 0;
+}
+
+function updateKaramayReleaseModeOptions() {
+  const dateValue = document.getElementById("karamayIntermentDate")?.value || "";
+  const input = document.getElementById("karamayLetterOfConsideration");
+  const container = document.getElementById("karamayLetterOfConsiderationContainer");
+  const interment = dateValue ? new Date(`${dateValue}T00:00:00`) : null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const hasSavedLetter = editingKaramayClaimAttachments.some(file => getKaramayAttachmentDocumentType(file) === "Letter of Consideration");
+  const needed = Boolean((interment && !Number.isNaN(interment.getTime()) && today > interment) || hasSavedLetter);
+  if (container) container.style.display = needed ? "block" : "none";
+  if (input && !needed && !editingKaramayClaimAttachments.some(file => getKaramayAttachmentDocumentType(file) === "Letter of Consideration")) input.value = "";
+}
+
 function getClaimYear(dateAdmitted) {
   const date = dateAdmitted ? new Date(`${dateAdmitted}T00:00:00`) : new Date();
   return Number.isNaN(date.getTime()) ? new Date().getFullYear() : date.getFullYear();
@@ -606,7 +721,7 @@ async function supabaseCountYearlyClaims(memberId, claimYear, excludedClaimId = 
   const db = getSupabaseClient();
   const { data, error } = await db
     .from(SUPABASE_TABLES.claims)
-    .select("claim_id,claim_status,status")
+    .select("claim_id,claim_status,status,attachments")
     .eq("member_id", memberId)
     .eq("claim_year", claimYear);
 
@@ -901,8 +1016,9 @@ async function supabaseCreateKaramayClaim(data) {
   if (!Array.isArray(request.attachments) || request.attachments.length < 2) {
     return { success: false, message: "Please upload the death certificate and valid ID attachments." };
   }
+  if (!hasRequiredKaramayAttachments(request.attachments, request.interment_date)) return { success: false, message: "Please upload the Letter of Consideration for requests made after interment." };
 
-  const { data: existingClaim, error: existingClaimError } = await db
+    const { data: existingClaim, error: existingClaimError } = await db
     .from(SUPABASE_TABLES.karamayClaims)
     .select("claim_id")
     .eq("claim_id", request.claim_id)
@@ -965,6 +1081,9 @@ async function supabaseEditKaramayClaim(data) {
     last_updated: new Date().toISOString(),
     last_updated_by: data.tellerEmail || data.tellerName || ""
   };
+  const existingAttachments = Array.isArray(existing.attachments) ? existing.attachments : [];
+  updates.attachments = mergeKaramayAttachments(existingAttachments, updates.attachments);
+  if (!hasRequiredKaramayAttachments(updates.attachments, updates.interment_date)) return { success: false, message: "Please upload the Letter of Consideration for requests made after interment." };
 
   const { error } = await db
     .from(SUPABASE_TABLES.karamayClaims)
@@ -993,6 +1112,7 @@ async function supabaseCreateRequest(data) {
   if (!data.dateAdmitted || !data.dateDischarged || days.actualDays <= 0) {
     return { success: false, message: "Please enter valid admitted and discharged dates." };
   }
+  if (isClaimPastDeadline(data.dateDischarged, 90)) return { success: false, message: "Hospitalization claims must be submitted within 90 days after discharge." };
 
   if (days.actualDays < MIN_ELIGIBLE_CONFINEMENT_DAYS) {
     return { success: false, message: `Hospital confinement must be at least ${MIN_ELIGIBLE_CONFINEMENT_DAYS} days to be eligible for a claim.` };
@@ -1084,6 +1204,7 @@ async function supabaseEditRequest(data) {
   if (!data.dateAdmitted || !data.dateDischarged || days.actualDays <= 0) {
     return { success: false, message: "Please enter valid admitted and discharged dates." };
   }
+  if (isClaimPastDeadline(data.dateDischarged, 90)) return { success: false, message: "Hospitalization claims must be submitted within 90 days after discharge." };
 
   if (days.actualDays < MIN_ELIGIBLE_CONFINEMENT_DAYS) {
     return { success: false, message: `Hospital confinement must be at least ${MIN_ELIGIBLE_CONFINEMENT_DAYS} days to be eligible for a claim.` };
@@ -1166,7 +1287,7 @@ async function supabaseUpdateStatus(data) {
   const tableName = isKaramayClaim ? SUPABASE_TABLES.karamayClaims : SUPABASE_TABLES.claims;
 
   if (isKaramayClaim) {
-    const { data: existing, error: findError } = await db
+  const { data: existing, error: findError } = await db
       .from(tableName)
       .select("claim_status,status")
       .eq("claim_id", data.request_id)
@@ -2173,6 +2294,9 @@ function populateKaramayClaimForm(row) {
   setInputValue("karamayBeneficiaryAddress", row[7] || "");
   setInputValue("karamayContactNumber", row[8] || "");
   setInputValue("karamayModeOfRelease", row[9] || "Actual Delivery (Bouquet and Cash)");
+  const existingLetter = editingKaramayClaimAttachments.find(file => getKaramayAttachmentDocumentType(file) === "Letter of Consideration");
+  if (existingLetter) editingKaramayClaimAttachments = normalizeKaramayAttachments(editingKaramayClaimAttachments);
+  updateKaramayReleaseModeOptions();
 
   const title = document.querySelector("#karamayModal .modal-header h3");
   if (title) title.innerText = "Edit Returned Karamay Claim";
@@ -2542,7 +2666,14 @@ function bindTellerClaimForm() {
   ["requestDateAdmitted", "requestDateDischarged"].forEach(id => {
     const input = document.getElementById(id);
     if (input && !input.dataset.claimBound) {
-      input.addEventListener("input", updateClaimComputation);
+      input.addEventListener("input", function() {
+        updateClaimComputation();
+        validateHospitalizationForm();
+      });
+      input.addEventListener("change", function() {
+        updateClaimComputation();
+        validateHospitalizationForm();
+      });
       input.dataset.claimBound = "true";
     }
   });
@@ -2579,6 +2710,9 @@ function resetRequestForm() {
 
   const attachments = document.getElementById("requestAttachments");
   if (attachments) attachments.value = "";
+  showFormValidationMessage("requestFormValidation", []);
+  const deadlineMessage = document.getElementById("requestDischargeDeadlineMessage");
+  if (deadlineMessage) { deadlineMessage.textContent = ""; deadlineMessage.style.display = "none"; }
 }
 
 function populateRequestForm(request) {
@@ -2612,6 +2746,7 @@ function populateRequestForm(request) {
 
   const attachmentsInput = document.getElementById("requestAttachments");
   if (attachmentsInput) attachmentsInput.value = "";
+  showFormValidationMessage("requestFormValidation", []);
 }
 
 function openEditRequest(requestId) {
@@ -2704,30 +2839,7 @@ async function submitRequestOnce() {
   const days = calculateHospitalDays(dateAdmitted, dateDischarged);
   const dailyRate = getDailyRateForSegmentation(segmentation);
 
-  if (!member) {
-    alert("Please select a member from the member search results.");
-    return;
-  }
-
-  if (!hospital) {
-    alert("Please select the hospital where the member was confined.");
-    return;
-  }
-
-  if (!dateAdmitted || !dateDischarged || days.actualDays <= 0) {
-    alert("Please enter valid admitted and discharged dates.");
-    return;
-  }
-
-  if (days.actualDays < MIN_ELIGIBLE_CONFINEMENT_DAYS) {
-    alert(`Hospital confinement must be at least ${MIN_ELIGIBLE_CONFINEMENT_DAYS} days to be eligible for a claim.`);
-    return;
-  }
-
-  if (!dailyRate) {
-    alert(`No daily rate is configured for the ${segmentation || "selected"} segmentation.`);
-    return;
-  }
+  if (!validateHospitalizationForm()) return;
 
   const requestIdInput = document.getElementById("requestId");
   let requestId = requestIdInput?.value?.trim() || editingRequestId;
@@ -5290,18 +5402,23 @@ function resetKaramayClaimForm() {
     "karamayContactNumber",
     "karamayModeOfRelease",
     "karamayDeathCertificate",
-    "karamayValidId"
+    "karamayValidId",
+    "karamayLetterOfConsideration"
   ].forEach(id => setInputValue(id, ""));
 
   const deathCertificate = document.getElementById("karamayDeathCertificate");
   const validId = document.getElementById("karamayValidId");
   if (deathCertificate) deathCertificate.value = "";
   if (validId) validId.value = "";
+  const considerationLetter = document.getElementById("karamayLetterOfConsideration");
+  if (considerationLetter) considerationLetter.value = "";
 
   const title = document.querySelector("#karamayModal .modal-header h3");
   if (title) title.innerText = "Karamay Claim Encoding";
   const submitButton = document.getElementById("karamaySubmitButton");
   if (submitButton) submitButton.textContent = "Forward to Branch Manager";
+  showFormValidationMessage("karamayFormValidation", []);
+  updateKaramayReleaseModeOptions();
 }
 
 async function submitKaramayClaim() {
@@ -5332,11 +5449,14 @@ async function submitKaramayClaim() {
 }
 
 async function submitKaramayClaimOnce() {
+  if (!validateKaramayForm()) return;
   const deathCertificate = await readRequestAttachments("karamayDeathCertificate");
   const validId = await readRequestAttachments("karamayValidId");
+  const letterOfConsideration = await readRequestAttachments("karamayLetterOfConsideration");
   const attachments = [
     ...deathCertificate.map(file => ({ ...file, document_type: "Death Certificate" })),
-    ...validId.map(file => ({ ...file, document_type: "Beneficiary Valid ID" }))
+    ...validId.map(file => ({ ...file, document_type: "Beneficiary Valid ID" })),
+    ...letterOfConsideration.map(file => ({ ...file, document_type: "Letter of Consideration" }))
   ];
 
   const isEdit = Boolean(editingKaramayClaimId);
@@ -5364,18 +5484,8 @@ async function submitKaramayClaimOnce() {
     attachments: attachmentsToSend
   };
 
-  if (!payload.memberName || !payload.memberBranchId || !payload.memberAddress || !payload.dateOfDeath || !payload.intermentDate) {
-    alert("Please complete the deceased member information.");
-    return;
-  }
-
-  if (!payload.beneficiaryName || !payload.relationship || !payload.beneficiaryAddress || !payload.contactNumber) {
-    alert("Please complete the beneficiary/requestor information.");
-    return;
-  }
-
-  if (!hasRequiredKaramayAttachments(attachmentsToSend)) {
-    alert("Please upload both required attachments.");
+  if (!hasRequiredKaramayAttachments(attachmentsToSend, payload.intermentDate)) {
+    showFormValidationMessage("karamayFormValidation", ["Attach the death certificate and beneficiary/requestor's valid ID. A Letter of Consideration is also required for requests made after interment."]);
     return;
   }
 

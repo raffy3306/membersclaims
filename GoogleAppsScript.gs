@@ -342,6 +342,14 @@ function calculateHospitalDays(dateAdmitted, dateDischarged) {
   };
 }
 
+function isClaimPastDeadline(eventDate, allowedDays) {
+  if (!eventDate) return false;
+  const event = new Date(String(eventDate).slice(0, 10) + "T00:00:00");
+  const today = new Date();
+  const current = new Date(today.getFullYear(), today.getMonth(), today.getDate());
+  return !isNaN(event.getTime()) && Math.floor((current - event) / 86400000) > allowedDays;
+}
+
 function getClaimYear(dateAdmitted) {
   const value = formatDateOnly(dateAdmitted);
   const date = value ? new Date(String(value).slice(0, 10) + "T00:00:00") : new Date();
@@ -612,6 +620,7 @@ function getKaramayAttachmentDocumentType(attachment, index) {
   if (normalizedType.indexOf("valid id") > -1 || normalizedType.indexOf("beneficiary id") > -1) {
     return "Beneficiary Valid ID";
   }
+  if (normalizedType.indexOf("letter") > -1 && normalizedType.indexOf("consideration") > -1) return "Letter of Consideration";
 
   if (explicitType) return explicitType;
   if (index === 0) return "Death Certificate";
@@ -646,11 +655,15 @@ function mergeKaramayAttachments(existingAttachments, replacementAttachments) {
   return order.map(function(key) { return mergedByType[key]; });
 }
 
-function hasRequiredKaramayAttachments(attachments) {
+function hasRequiredKaramayAttachments(attachments, intermentDate) {
   const types = normalizeKaramayAttachments(attachments).map(function(attachment, index) {
     return getKaramayAttachmentDocumentType(attachment, index);
   });
-  return types.indexOf("Death Certificate") > -1 && types.indexOf("Beneficiary Valid ID") > -1;
+  const interment = intermentDate ? new Date(String(intermentDate).slice(0, 10) + "T00:00:00") : null;
+  const now = new Date();
+  const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
+  const letterRequired = interment && !isNaN(interment.getTime()) && today > interment;
+  return types.indexOf("Death Certificate") > -1 && types.indexOf("Beneficiary Valid ID") > -1 && (!letterRequired || types.indexOf("Letter of Consideration") > -1);
 }
 
 function getKaramayAttachmentDataMeta() {
@@ -1290,8 +1303,8 @@ function createKaramayClaim(data) {
         return { success: false, message: "Please complete the beneficiary/requestor information." };
       }
 
-      if (!hasRequiredKaramayAttachments(attachments)) {
-        return { success: false, message: "Please upload the death certificate and valid ID attachments." };
+      if (!hasRequiredKaramayAttachments(attachments, data.intermentDate)) {
+        return { success: false, message: "Please upload the death certificate, valid ID, and Letter of Consideration when required." };
       }
 
       saveStage = "saving Karamay attachment data";
@@ -1391,8 +1404,8 @@ function editKaramayClaim(data) {
         return { success: false, message: "Please complete the beneficiary/requestor information." };
       }
 
-      if (!hasRequiredKaramayAttachments(merged)) {
-        return { success: false, message: "Please upload the death certificate and valid ID attachments." };
+      if (!hasRequiredKaramayAttachments(merged, data.intermentDate)) {
+        return { success: false, message: "Please upload the death certificate, valid ID, and Letter of Consideration when required." };
       }
 
       const stagedAttachments = stageKaramayAttachmentsInDrive(data.request_id, merged, existingAttachments);
@@ -1468,6 +1481,7 @@ function createRequest(data) {
       if (!data.dateAdmitted || !data.dateDischarged || actualDaysConfined <= 0) {
         return { success: false, message: "Please enter valid admitted and discharged dates." };
       }
+      if (isClaimPastDeadline(data.dateDischarged, 90)) return { success: false, message: "Hospitalization claims must be submitted within 90 days after discharge." };
 
       if (actualDaysConfined < MIN_ELIGIBLE_CONFINEMENT_DAYS) {
         return { success: false, message: "Hospital confinement must be at least " + MIN_ELIGIBLE_CONFINEMENT_DAYS + " days to be eligible for a claim." };
@@ -1564,6 +1578,7 @@ function editRequest(data) {
       if (!data.dateAdmitted || !data.dateDischarged || actualDaysConfined <= 0) {
         return { success: false, message: "Please enter valid admitted and discharged dates." };
       }
+      if (isClaimPastDeadline(data.dateDischarged, 90)) return { success: false, message: "Hospitalization claims must be submitted within 90 days after discharge." };
 
       if (actualDaysConfined < MIN_ELIGIBLE_CONFINEMENT_DAYS) {
         return { success: false, message: "Hospital confinement must be at least " + MIN_ELIGIBLE_CONFINEMENT_DAYS + " days to be eligible for a claim." };

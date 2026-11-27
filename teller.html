@@ -232,6 +232,7 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
+      <div id="requestFormValidation" role="status" aria-live="polite" style="display:none; margin:0 0 16px; padding:10px 12px; border-radius:4px;"></div>
       <div id="modalContent"></div>
     </div>
     <div class="modal-footer">
@@ -258,7 +259,7 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
       <div style="display: grid; grid-template-columns: 1.4fr 1fr; gap: 20px; margin-bottom: 20px;">
         <div>
           <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Member Name</label>
-          <input id="requestMember" list="memberOptions" placeholder="Search member name" autocomplete="off" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <input id="requestMember" list="memberOptions" placeholder="Search member name" autocomplete="off" oninput="validateHospitalizationForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
         </div>
         <div>
           <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Contact Number</label>
@@ -284,7 +285,7 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
       <div style="display: grid; grid-template-columns: 1fr; gap: 20px; margin-bottom: 20px;">
         <div>
           <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Hospital</label>
-          <select id="requestHospital" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <select id="requestHospital" onchange="validateHospitalizationForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
             <option value="">Select hospital</option>
           </select>
         </div>
@@ -293,11 +294,12 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 20px;">
         <div>
           <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Date Admitted</label>
-          <input id="requestDateAdmitted" type="date" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <input id="requestDateAdmitted" type="date" oninput="validateHospitalizationForm()" onchange="validateHospitalizationForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
         </div>
         <div>
           <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Date Discharged</label>
-          <input id="requestDateDischarged" type="date" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <input id="requestDateDischarged" type="date" oninput="validateHospitalizationForm()" onchange="validateHospitalizationForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <small id="requestDischargeDeadlineMessage" role="status" aria-live="polite" style="display:none; margin-top:6px; color:#b91c1c; font-weight:600;"></small>
         </div>
       </div>
 
@@ -327,7 +329,7 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
 
       <div style="margin-bottom: 20px;">
         <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Attachments</label>
-        <input id="requestAttachments" type="file" multiple style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+        <input id="requestAttachments" type="file" multiple onchange="validateHospitalizationForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
           <small style="display:block; margin-top:6px; color:#666;">Maximum 2 MB per file after compression. JPG, PNG and WebP photos are compressed automatically; PDFs and other files must already be 2 MB or smaller.</small>
       </div>
     </div>
@@ -346,13 +348,14 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
       <button class="modal-close" onclick="closeKaramayModal()">✕</button>
     </div>
     <div class="modal-body">
+      <div id="karamayFormValidation" role="status" aria-live="polite" style="display:none; margin:0 0 16px; padding:10px 12px; border-radius:4px;"></div>
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 24px;">
         <div>
           <h4 style="margin: 0 0 16px 0;">Member Information (Deceased Member)</h4>
           <div style="display: grid; gap: 14px;">
             <div>
               <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Name</label>
-              <input id="karamayMemberName" placeholder="Enter deceased member name" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+              <input id="karamayMemberName" placeholder="Enter deceased member name" oninput="validateKaramayForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
             </div>
             <div>
               <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Branch ID</label>
@@ -360,15 +363,15 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
             </div>
             <div>
               <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Address</label>
-              <textarea id="karamayMemberAddress" rows="3" placeholder="Enter deceased member address" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; resize: vertical;"></textarea>
+              <textarea id="karamayMemberAddress" rows="3" placeholder="Enter deceased member address" oninput="validateKaramayForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; resize: vertical;"></textarea>
             </div>
             <div>
               <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Date of Death</label>
-              <input id="karamayDateOfDeath" type="date" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+              <input id="karamayDateOfDeath" type="date" oninput="validateKaramayForm()" onchange="validateKaramayForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
             </div>
             <div>
               <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Interment Date</label>
-              <input id="karamayIntermentDate" type="date" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+              <input id="karamayIntermentDate" type="date" onchange="updateKaramayReleaseModeOptions(); validateKaramayForm()" oninput="updateKaramayReleaseModeOptions(); validateKaramayForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
             </div>
           </div>
         </div>
@@ -378,23 +381,23 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
           <div style="display: grid; gap: 14px;">
             <div>
               <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Name</label>
-              <input id="karamayBeneficiaryName" placeholder="Enter beneficiary or requestor name" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+              <input id="karamayBeneficiaryName" placeholder="Enter beneficiary or requestor name" oninput="validateKaramayForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
             </div>
             <div>
               <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Relationship to the Deceased</label>
-              <input id="karamayRelationship" placeholder="Example: Spouse, child, parent" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+              <input id="karamayRelationship" placeholder="Example: Spouse, child, parent" oninput="validateKaramayForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
             </div>
             <div>
               <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Address</label>
-              <textarea id="karamayBeneficiaryAddress" rows="3" placeholder="Enter beneficiary or requestor address" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; resize: vertical;"></textarea>
+              <textarea id="karamayBeneficiaryAddress" rows="3" placeholder="Enter beneficiary or requestor address" oninput="validateKaramayForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; resize: vertical;"></textarea>
             </div>
             <div>
               <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Contact Number</label>
-              <input id="karamayContactNumber" placeholder="Enter contact number" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+              <input id="karamayContactNumber" placeholder="Enter contact number" oninput="validateKaramayForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
             </div>
             <div>
               <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Mode of Release</label>
-              <select id="karamayModeOfRelease" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; background: #fff;">
+              <select id="karamayModeOfRelease" onchange="validateKaramayForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px; background: #fff;">
                 <option value="Actual Delivery (Bouquet and Cash)">Actual Delivery (Bouquet and Cash)</option>
                 <option value="P2,000.00 Cash Equivalent">P2,000.00 Cash Equivalent</option>
               </select>
@@ -406,14 +409,19 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
       <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 24px;">
         <div>
           <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Certified True Copy of Death Certificate</label>
-          <input id="karamayDeathCertificate" type="file" accept="image/*,.pdf" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <input id="karamayDeathCertificate" type="file" accept="image/*,.pdf" onchange="validateKaramayForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
           <small style="display:block; margin-top:6px; color:#666;">Maximum 2 MB per file after compression. JPG, PNG and WebP photos are compressed automatically; PDFs and other files must already be 2 MB or smaller.</small>
         </div>
         <div>
           <label style="font-size: 12px; color: #666; text-transform: uppercase; font-weight: 600; display: block; margin-bottom: 8px;">Photocopy of Valid ID of Beneficiary / Requestor</label>
-          <input id="karamayValidId" type="file" accept="image/*,.pdf" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
+          <input id="karamayValidId" type="file" accept="image/*,.pdf" onchange="validateKaramayForm()" style="width: 100%; padding: 12px; border: 1px solid #ddd; border-radius: 4px; font-size: 14px;">
           <small style="display:block; margin-top:6px; color:#666;">Maximum 2 MB per file after compression. JPG, PNG and WebP photos are compressed automatically; PDFs and other files must already be 2 MB or smaller.</small>
         </div>
+      </div>
+      <div id="karamayLetterOfConsiderationContainer" style="display:none; margin-bottom:24px;">
+        <label style="font-size:12px; color:#666; text-transform:uppercase; font-weight:600; display:block; margin-bottom:8px;">Letter of Consideration</label>
+        <input id="karamayLetterOfConsideration" type="file" accept="image/*,.pdf" onchange="validateKaramayForm()" style="width:100%; padding:12px; border:1px solid #ddd; border-radius:4px; font-size:14px;">
+        <small style="display:block; margin-top:6px; color:#666;">Required when the request is made after the interment date. Maximum 2 MB per file.</small>
       </div>
     </div>
     <div class="modal-footer">
