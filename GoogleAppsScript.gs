@@ -662,7 +662,7 @@ function hasRequiredKaramayAttachments(attachments, intermentDate) {
   const interment = intermentDate ? new Date(String(intermentDate).slice(0, 10) + "T00:00:00") : null;
   const now = new Date();
   const today = new Date(now.getFullYear(), now.getMonth(), now.getDate());
-  const letterRequired = interment && !isNaN(interment.getTime()) && today > interment;
+  const letterRequired = interment && !isNaN(interment.getTime()) && Math.floor((today - interment) / 86400000) > 30;
   return types.indexOf("Death Certificate") > -1 && types.indexOf("Beneficiary Valid ID") > -1 && (!letterRequired || types.indexOf("Letter of Consideration") > -1);
 }
 
