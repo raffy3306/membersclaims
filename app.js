@@ -648,7 +648,15 @@ function validateHospitalizationForm() {
   if (admissionDate && !Number.isNaN(admissionDate.getTime()) && admissionDate > today) errors.push("Admission date cannot be in the future.");
   if (dischargeDate && !Number.isNaN(dischargeDate.getTime()) && dischargeDate > today) errors.push("Discharge date cannot be in the future.");
   if (admitted && discharged && days.actualDays <= 0) errors.push("Discharge date must be after admission date.");
-  if (days.actualDays > 0 && days.actualDays < MIN_ELIGIBLE_CONFINEMENT_DAYS) errors.push(`Hospital confinement must be at least ${MIN_ELIGIBLE_CONFINEMENT_DAYS} days.`);
+  const isBelowMinimumDays = days.actualDays > 0 && days.actualDays < MIN_ELIGIBLE_CONFINEMENT_DAYS;
+  const confinementWarning = document.getElementById("requestConfinementWarning");
+  if (confinementWarning) {
+    confinementWarning.innerHTML = isBelowMinimumDays
+      ? `<strong>Claim not eligible:</strong> This confinement is ${days.actualDays} day${days.actualDays === 1 ? "" : "s"}. A minimum of ${MIN_ELIGIBLE_CONFINEMENT_DAYS} days is required.`
+      : "";
+    confinementWarning.style.display = isBelowMinimumDays ? "block" : "none";
+  }
+  if (isBelowMinimumDays) errors.push(`Hospital confinement must be at least ${MIN_ELIGIBLE_CONFINEMENT_DAYS} days.`);
   const deadlineMessage = document.getElementById("requestDischargeDeadlineMessage");
   const isPastFilingDeadline = discharged && isClaimPastDeadline(discharged, 90);
   if (isPastFilingDeadline) errors.push("Hospitalization claims must be submitted within 90 days after discharge.");
@@ -2711,6 +2719,8 @@ function resetRequestForm() {
 
   const attachments = document.getElementById("requestAttachments");
   if (attachments) attachments.value = "";
+  const confinementWarning = document.getElementById("requestConfinementWarning");
+  if (confinementWarning) { confinementWarning.innerHTML = ""; confinementWarning.style.display = "none"; }
   showFormValidationMessage("requestFormValidation", []);
   const deadlineMessage = document.getElementById("requestDischargeDeadlineMessage");
   if (deadlineMessage) { deadlineMessage.textContent = ""; deadlineMessage.style.display = "none"; }
@@ -2747,6 +2757,8 @@ function populateRequestForm(request) {
 
   const attachmentsInput = document.getElementById("requestAttachments");
   if (attachmentsInput) attachmentsInput.value = "";
+  const confinementWarning = document.getElementById("requestConfinementWarning");
+  if (confinementWarning) { confinementWarning.innerHTML = ""; confinementWarning.style.display = "none"; }
   showFormValidationMessage("requestFormValidation", []);
 }
 
