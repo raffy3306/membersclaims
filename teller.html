@@ -232,7 +232,6 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
       <button class="modal-close" onclick="closeModal()">✕</button>
     </div>
     <div class="modal-body">
-      <div id="requestFormValidation" role="status" aria-live="polite" style="display:none; margin:0 0 16px; padding:10px 12px; border-radius:4px;"></div>
       <div id="modalContent"></div>
     </div>
     <div class="modal-footer">
@@ -249,6 +248,7 @@ if (!sessionStorage.getItem("membersClaimsSessionToken") || !["crs", "teller", "
       <button class="modal-close" onclick="closeRequestModal()">✕</button>
     </div>
     <div class="modal-body">
+      <div id="requestFormValidation" role="status" aria-live="polite" style="display:none; margin:0 0 16px; padding:10px 12px; border-radius:4px;"></div>
       <input id="requestMemberId" type="hidden">
       <input id="requestId" type="hidden">
       <datalist id="memberOptions"></datalist>
